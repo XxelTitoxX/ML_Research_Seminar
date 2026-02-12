@@ -1,0 +1,6 @@
+mlflow:
+  tracking_uri: ./mlruns
+  experiment_name: default
+  run_name: null
+  log_models: true
+  tags: {}

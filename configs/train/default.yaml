@@ -1,0 +1,9 @@
+train:
+  epochs: 100
+  lr: 1e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  checkpoint_every: 1
+  run_root: ./runs
+  run_checkpoints_subdir: checkpoints
+  clean_checkpoints_dir: ./checkpoints

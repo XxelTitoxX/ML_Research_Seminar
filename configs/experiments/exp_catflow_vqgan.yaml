@@ -1,0 +1,11 @@
+experiment:
+  name: catflow_vqgan_baseline
+  seed: 42
+  config_paths:
+    - configs/data/default.yaml
+    - configs/model/catflow.yaml
+    - configs/model/vqgan.yaml
+    - configs/train/default.yaml
+    - configs/eval/default.yaml
+    - configs/logging/mlflow.yaml
+    - configs/logging/wandb.yaml

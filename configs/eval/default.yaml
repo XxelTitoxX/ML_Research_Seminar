@@ -1,0 +1,4 @@
+eval:
+  metrics: [fid, nn_accuracy, nn_recall, gen_distance]
+  num_samples: 5000
+  output_dir: ./runs

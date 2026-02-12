@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Data & artifacts
+data/raw/
+data/processed/
+data/metadata/*.pkl
+checkpoints/
+runs/
+runs/**/checkpoints/
+artifacts/
+mlruns/
+wandb/
+
+# Logs
+logs/
+*.log

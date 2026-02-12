@@ -1,0 +1,4 @@
+model:
+  name: vqgan
+  checkpoint_path: ./pretrained/vqgan/TBD/checkpoint.ckpt
+  config_path: ./pretrained/vqgan/TBD/config.yaml

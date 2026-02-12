@@ -1,0 +1,7 @@
+data:
+  dataset_name: TBD
+  data_root: ./data/raw
+  processed_root: ./data/processed
+  splits: [train, val, test]
+  batch_size: 64
+  num_workers: 4

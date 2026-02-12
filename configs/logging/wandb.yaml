@@ -1,0 +1,6 @@
+wandb:
+  project: ml-research-seminar
+  entity: null
+  mode: online  # online|offline|disabled
+  tags: []
+  notes: null
