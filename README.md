@@ -227,4 +227,28 @@ for d in range(D):
 loss = loss.mean()
 loss.backward()
 optimizer.step()
+```
+
+## 11. Sampling (Euler)
+
+```python
+x = torch.randn(B, M)                # x(0)
+for n in range(N_steps):
+    t = n / N_steps                  # scalar in [0,1)
+    t_tensor = torch.full((B,1), t)
+
+    logits = f_theta(x, t_tensor)
+    mu = segmented_softmax(logits)   # [B, M]
+
+    v = (mu - x) / (1 - t + eps)
+    x = x + (1 / N_steps) * v
+
+# decode
+c_hat = []
+for d in range(D):
+    x_d = x[:, slice_d]              # [B, K_d]
+    c_hat.append(x_d.argmax(dim=-1))
+c_hat = torch.stack(c_hat, dim=1)    # [B, D]
+```
+
 
