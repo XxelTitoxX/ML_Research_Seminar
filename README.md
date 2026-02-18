@@ -1,2 +1,230 @@
 # ML_Research_Seminar
 CatFlow for quantized data
+
+Reference : *Variational Flow Matching for Graph Generation* (Liu et al., NeurIPS 2024, arXiv:2406.04843).
+
+# CatFlow / Variational Flow Matching for **generic categorical data** — training pipeline
+
+This document specifies an implementable training + sampling pipeline for **CatFlow**, i.e. *mean-field variational flow matching (VFM) for categorical variables*, abstracted away from graphs so it applies to **any** collection of categorical variables.  
+(Adapted from “Variational Flow Matching for Graph Generation”, NeurIPS 2024 / arXiv:2406.04843v2.) :contentReference[oaicite:0]{index=0}
+
+---
+
+## 1. Problem setup and notation
+
+We model a datapoint as **D categorical variables**:
+- For each dimension `d ∈ {1,…,D}`, the variable takes values in `{1,…,K_d}`.
+- A datapoint in integer form is:
+  - `c1 = (c1^1, …, c1^D)` where `c1^d ∈ {1,…,K_d}`.
+  - **Data type:** `int64` (or `int32`) tensor of shape `[D]` (or `[B, D]` for batch).
+
+### One-hot / simplex representation (the continuous state space)
+CatFlow runs a continuous-time flow in a real-valued space by representing categories as one-hot vectors.
+
+For each dimension `d`, define a one-hot vector:
+- `x1^d ∈ {0,1}^{K_d}` with `x1^d[k] = 1` iff `c1^d = k`.
+- **Data type:** `float32` tensor.
+
+Concatenate all `D` one-hots into one vector:
+- `x1 = concat(x1^1, …, x1^D) ∈ {0,1}^M`, where `M = Σ_d K_d`.
+- **Data type:** `float32` tensor of shape `[M]` (or `[B, M]`).
+
+We will also use the “block” view:
+- `x` can be reshaped/split into blocks `(x^1,…,x^D)` where `x^d ∈ ℝ^{K_d}`.
+
+---
+
+## 2. Prior distribution `p0` and time variable
+
+### Time
+- Sample `t ~ Uniform(0,1)`.
+- **Data type:** `float32` scalar (or `[B]`), often broadcast into the model.
+
+### Prior `p0`
+Choose a simple tractable prior over the continuous space `ℝ^M`, e.g.:
+- `x0 ~ Normal(0, I_M)`.
+- **Data type:** `float32` tensor of shape `[M]` (or `[B, M]`).
+
+> Any easy-to-sample prior in `ℝ^M` works; the paper uses a standard normal in practice for categorical graph generation. :contentReference[oaicite:1]{index=1}
+
+---
+
+## 3. Interpolant (forward “corruption” path)
+
+Given `x0` and `x1`, define a **linear interpolant**:
+- `x_t = t * x1 + (1 - t) * x0`.
+- **Data type:** `float32` tensor shape `[M]` (or `[B, M]`).
+
+This implies the *conditional* velocity field toward endpoint `x1` (used conceptually) is:
+- `u_t(x | x1) = (x1 - x) / (1 - t)`.
+
+CatFlow will **not** regress this vector field with MSE; instead it learns a categorical distribution over endpoints.
+
+---
+
+## 4. Model parameterization (what the neural net outputs)
+
+CatFlow learns a **mean-field variational endpoint distribution**:
+
+For each dimension `d`, the model outputs a categorical distribution over its `K_d` categories:
+- `q_θ,t(x1^d = k | x_t) = μ_t^{d,k}(x_t)` where `Σ_k μ_t^{d,k} = 1`.
+
+Implementation detail:
+- The network `f_θ` takes `(x_t, t)` and returns **logits** for each category:
+  - `logits_t^d(x_t) ∈ ℝ^{K_d}`.
+  - `μ_t^d(x_t) = softmax(logits_t^d(x_t))`.
+- **Data types:**
+  - `logits`: `float32` tensor shaped like `[M]` or `[B, M]` (with per-dimension segments).
+  - `μ`: `float32` probabilities, same shape.
+
+Collect all per-dimension probability vectors:
+- `μ_t(x_t) = concat(μ_t^1(x_t), …, μ_t^D(x_t)) ∈ [0,1]^M`.
+
+---
+
+## 5. Training objective (CatFlow loss)
+
+### Target
+The supervision target is the *true endpoint* `x1` (equivalently the true categories `c1`).
+
+### Loss = sum of per-dimension cross-entropies
+For one sample:
+- `L = - Σ_{d=1..D} log μ_t^{d, c1^d}(x_t)`.
+
+Equivalently in one-hot form:
+- `L = - Σ_{d=1..D} Σ_{k=1..K_d} x1^d[k] * log μ_t^{d,k}(x_t)`.
+
+**Data types:**
+- `L`: `float32` scalar (or `[B]`, then averaged).
+- Use numerically stable cross-entropy (log-softmax + gather).
+
+This is exactly the CatFlow objective given in the paper. :contentReference[oaicite:2]{index=2}
+
+---
+
+## 6. One training step (fully specified)
+
+Given a minibatch of integer categorical data `c1`:
+1. **Convert to one-hot endpoint**
+   - Build `x1 ∈ {0,1}^M` from `c1`.
+   - dtype `float32`, shape `[B, M]`.
+
+2. **Sample prior**
+   - Sample `x0 ~ Normal(0, I_M)`.
+   - dtype `float32`, shape `[B, M]`.
+
+3. **Sample times**
+   - Sample `t ~ Uniform(0,1)`.
+   - dtype `float32`, shape `[B]` (or `[B,1]` for broadcasting).
+
+4. **Compute interpolated state**
+   - `x_t = t * x1 + (1 - t) * x0`.
+   - dtype `float32`, shape `[B, M]`.
+
+5. **Forward pass**
+   - `logits = f_θ(x_t, t)` → dtype `float32`, shape `[B, M]`.
+   - Split logits by dimension `d` into `[B, K_d]`.
+   - `μ_t^d = softmax(logits^d)`.
+
+6. **Compute loss**
+   - `L = Σ_d CrossEntropy(logits^d, target=c1^d)`.
+   - Average over batch: `L_batch = mean(L)`.
+
+7. **Backprop + optimizer step**
+   - Standard gradient descent (e.g. AdamW).
+   - Optional: gradient clipping.
+
+This training procedure matches “Algorithm 2” in the paper. :contentReference[oaicite:3]{index=3}
+
+---
+
+## 7. Learned vector field (used for sampling)
+
+Although training is classification, CatFlow defines a continuous vector field in `ℝ^M`:
+
+1. Compute `μ_t(x)` from the network (as above).
+2. Define the vector field:
+   - `v_θ,t(x) = ( μ_t(x) - x ) / (1 - t)`.
+
+In practice use a small `ε > 0` to avoid division by zero near `t = 1`:
+- `v_θ,t(x) = ( μ_t(x) - x ) / (1 - t + ε)`.
+
+**Data types:**
+- `x`: `float32` `[B, M]`
+- `v`: `float32` `[B, M]`
+
+This is the CatFlow sampling dynamics in the paper. :contentReference[oaicite:4]{index=4}
+
+---
+
+## 8. Generation / sampling algorithm (ODE solve)
+
+To generate a sample:
+
+1. **Sample initial state**
+   - `x(0) = x0 ~ Normal(0, I_M)`.
+
+2. **Solve ODE from t=0 to t=1**
+   - Dynamics: `dx/dt = ( μ_t(x(t)) - x(t) ) / (1 - t + ε)`.
+   - Use any ODE solver (Euler / Heun / RK4 / adaptive solvers).
+   - At each solver evaluation:
+     - Compute `logits = f_θ(x, t)` → `μ_t(x) = softmax(logits)` (blockwise).
+     - Compute `v_θ,t(x)` and update.
+
+3. **Convert final continuous state to discrete categories**
+   At `t=1`, you have `x(1) ∈ ℝ^M`. Produce categorical output per dimension `d` via either:
+   - **Argmax (deterministic):** `ĉ^d = argmax_k x(1)^d[k]`
+   - **Sample from predicted probs:** run the network at `t=1` (or `t=1-δ`) to get `μ_1^d` and sample `ĉ^d ~ Categorical(μ_1^d)`.
+
+This is “Algorithm 2 — Generation” in the paper. :contentReference[oaicite:5]{index=5}
+
+---
+
+## 9. Practical implementation notes
+
+### Shapes and segmentation
+Because `K_d` may differ across dimensions, implement segmentation by:
+- Keeping an index map of slices `[start_d : end_d)` in the concatenated vector.
+- Applying softmax **within each slice**.
+
+### Conditioning on time
+Common choices:
+- Concatenate `t` (or an embedding of `t`) to `x_t`.
+- Use sinusoidal/Fourier time embeddings and inject into the network.
+
+### Choice of `ε`
+- Typical: `ε = 1e-3` (or solver-dependent).
+- Purpose: avoid exploding velocities near `t=1`.
+
+### Network architecture
+CatFlow only requires a model that maps `(x_t, t) → logits over categories per variable`.
+This can be:
+- An MLP (independent variables),
+- A Transformer over variables (captures dependencies),
+- Any structure-aware model if your categorical variables have structure.
+The training and sampling rules above remain unchanged.
+
+---
+
+## 10. Minimal pseudocode
+
+### Training
+```python
+# c1: int tensor [B, D], values in [0..K_d-1]
+x1 = one_hot_concat(c1)              # float32 [B, M]
+x0 = torch.randn(B, M)               # float32 [B, M]
+t  = torch.rand(B, 1)                # float32 [B, 1]
+
+x_t = t * x1 + (1 - t) * x0          # float32 [B, M]
+logits = f_theta(x_t, t)             # float32 [B, M], segmented
+
+loss = 0.0
+for d in range(D):
+    logits_d = logits[:, slice_d]    # [B, K_d]
+    target_d = c1[:, d]              # [B]
+    loss += cross_entropy(logits_d, target_d)
+
+loss = loss.mean()
+loss.backward()
+optimizer.step()
+
