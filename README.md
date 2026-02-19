@@ -5,7 +5,7 @@ Reference : *Variational Flow Matching for Graph Generation* (Liu et al., NeurIP
 
 # CatFlow / Variational Flow Matching for **generic categorical data** — training pipeline
 
-This document specifies an implementable training + sampling pipeline for **CatFlow**, i.e. *mean-field variational flow matching (VFM) for categorical variables*, abstracted away from graphs so it applies to **any** collection of categorical variables.  
+This document specifies an implementable training  + sampling pipeline for **CatFlow**, i.e. *mean-field variational flow matching (VFM) for categorical variables*, abstracted away from graphs so it applies to **any** collection of categorical variables.  
 (Adapted from “Variational Flow Matching for Graph Generation”, NeurIPS 2024 / arXiv:2406.04843v2.) :contentReference[oaicite:0]{index=0}
 
 ---
