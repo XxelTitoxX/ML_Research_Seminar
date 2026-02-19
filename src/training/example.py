@@ -102,7 +102,7 @@ def main() -> None:
     hidden_dim = 128
     num_layers = 3
     batch_size = 256
-    n_steps = 4
+    n_steps = 400 # Change between 4 and 400 to observe difference in generation quality
     lr = 1e-3
 
     # Fake data
@@ -160,7 +160,7 @@ def main() -> None:
     plt.tight_layout()
 
     os.makedirs("runs", exist_ok=True)
-    out_path = os.path.join("runs", "catflow_example.png")
+    out_path = os.path.join("runs", f"catflow_distrib_nsamples{n_samples}_d{d}_k{k}_steps{n_steps}.png")
     plt.savefig(out_path, dpi=150)
     print(f"saved plot to {out_path}")
 
