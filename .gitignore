@@ -8,6 +8,8 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+LlamaGen/
+data/
 
 # Data & artifacts
 data/raw/
