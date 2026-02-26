@@ -159,7 +159,7 @@ class LlamaCatFlow(CatFlow):
         logits,_ = self.model(x, t, cond_idx)
         return (self.softmax(logits) - x)/(1-t.view(-1, *dims) + self.eps_)
 
-    def generate(self,n_samples,top_p,top_k, method='midpoint', rtol=1e-5, atol=1e-5):
+    def generate(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):
         logits = self.sample(n_samples, method=method, rtol=rtol, atol=atol)
 
         indices = torch.argmax(logits, dim=-1)

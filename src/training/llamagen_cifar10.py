@@ -71,9 +71,7 @@ def main():
     vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(16,))
     '''
     print("test wrapper")
-    out = vfm_wrapper.generate(n_samples=10,
-                         top_p=0.9,
-                         top_k=0.9)
+    out = vfm_wrapper.generate(n_samples=10)
     '''
     
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
