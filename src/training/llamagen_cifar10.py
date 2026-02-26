@@ -54,7 +54,7 @@ def main():
     lr = 1e-4
 
     vq_model = VQ_8().to(device)
-    vq_checkpoint_path = "src/checkpoints/vq_ds8_c2i.pt"
+    vq_checkpoint_path = hf_hub_download(repo_id="GAD-cell/VQ_VAE_8", filename="vq_ds8_c2i.pt", cache_dir="src/checkpoints")
     vq_model.load_state_dict(torch.load(vq_checkpoint_path, map_location=device)["model"])
     vq_model.eval()
 
