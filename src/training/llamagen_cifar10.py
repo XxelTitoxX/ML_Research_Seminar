@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn.functional as F
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, utils
 from torch.utils.data import DataLoader
 from huggingface_hub import hf_hub_download
 import sys
@@ -43,6 +43,15 @@ def catflow_loss(model, x1_indices, cond_idx, k, device):
     loss = F.cross_entropy(logits.reshape(-1, k), x1_indices.view(-1).to(device))
     return loss
 
+@torch.no_grad()
+def save_samples(vfm_wrapper, vq_model, step, device, n_samples=2):
+    images = vfm_wrapper.generate(n_samples=n_samples)
+
+    imgs = (imgs.clamp(-1, 1) + 1) / 2
+    os.makedirs("samples", exist_ok=True)
+    grid = utils.make_grid(imgs, nrow=n_samples)
+    utils.save_image(grid, f"samples/step_{step}.png")
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -51,6 +60,7 @@ def main():
     block_size = 16 
     batch_size = 64
     n_steps = 10000
+    sample_every = 500
     lr = 1e-4
 
     vq_model = VQ_8().to(device)
@@ -102,6 +112,11 @@ def main():
         
         if step % 10 == 0:
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        
+        if step % sample_every == 0:
+                    model.eval()
+                    save_samples(vfm_wrapper, vq_model, step, device)
+                    model.train()
 
 if __name__ == "__main__":
     main()
