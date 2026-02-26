@@ -53,7 +53,7 @@ class CatFlow(nn.Module):
 
     def conditional_flow(self, t, x, x1):
         """
-        Computes \phi(t,x) = \sigma(t, x1)x + \mu(t, x1), where \phi(0,x) = x = x0
+        Computes \\phi(t,x) = \\sigma(t, x1)x + \\mu(t, x1), where \\phi(0,x) = x = x0
         
         :param t: timestep. Float in [0,1].
         :param x0: starting point sampled from N(0, I).
@@ -134,3 +134,42 @@ class CatFlow(nn.Module):
         result_info = result_info + f"\nTrainable parameters: {trainable_parameters}"
 
         return result_info
+    
+
+class LlamaCatFlow(CatFlow):
+    def __init__(self, model, vq_model, p0=None, obs_dim=(16,)):
+        '''
+        obs_dim: number of tokens (16 if using cifar-10 with patch size of 8)
+        '''
+        
+        num_classes = vq_model.config.codebook_size
+        if not p0:
+            p0 = torch.distributions.MultivariateNormal(torch.zeros(num_classes), torch.eye(num_classes))
+        super().__init__(model, p0, obs_dim)
+ 
+        self.vq_model = vq_model
+
+    def velocity(self, t, x, cond_idx=None):
+        '''
+        t: timestep
+        x: x_t, current point
+        '''
+        t = self.process_timesteps(t, x)
+        dims = [1]*(len(x.shape)-1)
+        logits,_ = self.model(x, t, cond_idx)
+        return (self.softmax(logits) - x)/(1-t.view(-1, *dims) + self.eps_)
+
+    def generate(self,n_samples,top_p,top_k, method='midpoint', rtol=1e-5, atol=1e-5):
+        logits = self.sample(n_samples, method=method, rtol=rtol, atol=atol)
+
+        indices = torch.argmax(logits, dim=-1)
+        block_size = self.obs_dim[0]
+        h = int(block_size**0.5)
+        w = h
+        indices = indices.reshape(n_samples,h,w)
+
+        decoded_img = self.vq_model.decode_code(indices,shape=(n_samples,-1,h,w))
+        return decoded_img
+        
+
+    

@@ -13,7 +13,8 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from models.llama_models import GPT_B
-from models.vq_model import VQ_8, VQ_16
+from models.vq_model import VQ_8
+from models.vfm_wrapper import LlamaCatFlow
 
 def load_cifar10(batch_size):
     transform = transforms.Compose([
@@ -36,8 +37,10 @@ def catflow_loss(model, x1_indices, cond_idx, k, device):
     x_t = t * x1 + (1.0 - t) * x0
     
     logits, _ = model(x_t, t.squeeze(-1), cond_idx)
-
-    loss = F.cross_entropy(logits[:, 1:, :].reshape(-1, k), x1_indices.view(-1).to(device))
+    if cond_idx:
+        logits = logits[:, 1:, :]
+    
+    loss = F.cross_entropy(logits.reshape(-1, k), x1_indices.view(-1).to(device))
     return loss
 
 def main():
@@ -65,6 +68,14 @@ def main():
     model.load_state_dict(torch.load(llama_checkpoint_path, map_location=device), strict=False)
     model.train()
 
+    vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(16,))
+    '''
+    print("test wrapper")
+    out = vfm_wrapper.generate(n_samples=10,
+                         top_p=0.9,
+                         top_k=0.9)
+    '''
+    
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     dataloader = load_cifar10(batch_size)
     
@@ -82,10 +93,10 @@ def main():
         cond_idx = cond_idx.to(device)
         
         with torch.no_grad():
-            _, _, (_, _, idx) = vq_model.encode(images)
+            quant, _, (_, _, idx) = vq_model.encode(images)
             x1_indices = idx.view(batch_size, -1)
 
-        loss = catflow_loss(model, x1_indices, cond_idx, vocab_size, device)
+        loss = catflow_loss(model, x1_indices, cond_idx=None, k=vocab_size, device=device) #remove none to use class conditioning
         
         opt.zero_grad()
         loss.backward()

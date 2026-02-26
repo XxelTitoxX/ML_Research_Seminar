@@ -330,23 +330,27 @@ class Transformer(nn.Module):
         self, 
         x_t: torch.Tensor,     
         t: torch.Tensor,         
-        cond_idx: torch.Tensor, 
+        cond_idx: Optional[torch.Tensor] = None, 
         targets: Optional[torch.Tensor] = None,
     ):
-        cond_embeddings = self.cls_embedding(cond_idx, train=self.training)[:, :self.cls_token_num]
+       
         token_embeddings = self.tok_embeddings(x_t)
-        
         t_embed = self.time_embed(t.view(-1, 1)).unsqueeze(1)
-        
-        h = torch.cat((cond_embeddings, token_embeddings), dim=1)
+
+        if cond_idx:
+            cond_embeddings = self.cls_embedding(cond_idx, train=self.training)[:, :self.cls_token_num]
+            h = torch.cat((cond_embeddings, token_embeddings), dim=1)
+        else :
+           h =  token_embeddings
+
         h = h + t_embed
         h = self.tok_dropout(h)
         
         seq_len = h.shape[1]
         freqs_cis = self.freqs_cis[:seq_len].to(h.device)
 
-        mask = self.causal_mask[:seq_len, :seq_len].to(h.device)
-        
+        mask = self.causal_mask[:, :seq_len, :seq_len].to(h.device)
+
         for layer in self.layers:
             h = layer(h, freqs_cis, mask=mask)
         
