@@ -18,6 +18,7 @@ def vanilla_scfm(
     batch_size,
     nb_teacher_steps,
     ratio_teacher_samples,
+    s_range,
     device,
     optimizer,
     cycling,
@@ -37,7 +38,7 @@ def vanilla_scfm(
             x_0 = x_0 * vae.config.scaling_factor
         x_1 = torch.randn_like(x_0)
 
-        s = torch.empty(batch_size, device=device).uniform_(2.5, 4.5)
+        s = torch.empty(batch_size, device=device).uniform_(*s_range)
 
         # Part A: Teacher (Skip = 1)
         j_teacher = torch.randint(
@@ -122,10 +123,8 @@ def vanilla_scfm(
         optimizer.step()
 
         if cycling and step != 0 and step % restart_interval == 0:
-            ema_dict = ema_net.state_dict()
-            student_dict = student_net.state_dict()
-            for key in ema_dict.keys():
-                ema_dict[key] = copy.deepcopy(student_dict[key])
+            ema_net.module.load_state_dict(student_net.state_dict())
+            ema_net.n_averaged.fill_(0)
         else:
             ema_net.update_parameters(student_net)
 
@@ -152,6 +151,7 @@ def dual_ema_scfm(
     batch_size,
     nb_teacher_steps,
     ratio_teacher_samples,
+    s_range,
     device,
     optimizer,
     run,
@@ -169,7 +169,7 @@ def dual_ema_scfm(
             x_0 = x_0 * vae.config.scaling_factor
         x_1 = torch.randn_like(x_0)
 
-        s = torch.empty(batch_size, device=device).uniform_(2.5, 4.5)
+        s = torch.empty(batch_size, device=device).uniform_(*s_range)
 
         # Part A: Teacher (Skip = 1)
         j_teacher = torch.randint(
@@ -472,6 +472,7 @@ def main(args):
             args.batch_size,
             args.nb_teacher_steps,
             args.ratio_teacher_samples,
+            args.s_range,
             device,
             optimizer,
             args.cycling,
@@ -491,6 +492,7 @@ def main(args):
             args.batch_size,
             args.nb_teacher_steps,
             args.ratio_teacher_samples,
+            args.s_range,
             device,
             optimizer,
             run,
