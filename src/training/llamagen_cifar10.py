@@ -52,8 +52,8 @@ def main():
         num_classes=10,
         block_size=16,
         batch_size=16,
-        n_epochs=100,
-        sample_every_epoch=10,
+        n_epochs=200,
+        sample_every_steps=10,
         lr=1e-4,
         grad_clip=1.0,
     )
@@ -65,7 +65,7 @@ def main():
     block_size = config["block_size"]
     batch_size = config["batch_size"]
     n_epochs = config["n_epochs"]
-    sample_every_epoch = config["sample_every_epoch"]
+    sample_every_steps = config["sample_every_steps"]
     lr = config["lr"]
     grad_clip = config["grad_clip"]
 
@@ -117,6 +117,16 @@ def main():
             }, step=global_step)
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+            if global_step % config["sample_every_steps"] == 0:
+                model.eval()
+                with torch.no_grad():
+                    imgs = vfm_wrapper.generate(n_samples=4)
+                    imgs = (imgs.clamp(-1, 1) + 1) / 2
+                    grid = utils.make_grid(imgs, nrow=4)
+                    wandb.log({"samples": wandb.Image(grid)}, step=global_step)
+                model.train()
+
         
         avg_loss = epoch_loss / len(dataloader)
         wandb.log({
@@ -125,22 +135,15 @@ def main():
         }, step=global_step)
         print(f"Epoch {epoch} | avg_loss {avg_loss:.4f}")
 
-        if global_step % 2000 == 0:
-            model.eval()
-            with torch.no_grad():
-                imgs = vfm_wrapper.generate(n_samples=4)
-                imgs = (imgs.clamp(-1, 1) + 1) / 2
-                grid = utils.make_grid(imgs, nrow=4)
-                wandb.log({"samples": wandb.Image(grid)}, step=global_step)
-            model.train()
 
         os.makedirs("checkpoints", exist_ok=True)
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": opt.state_dict(),
-            "avg_loss": avg_loss,
-        }, f"checkpoints/epoch_{epoch}.pt")
+        if epoch % 10 == 0:
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": opt.state_dict(),
+                "avg_loss": avg_loss,
+            }, f"checkpoints/epoch_{epoch}.pt")
 
     wandb.finish()
 
