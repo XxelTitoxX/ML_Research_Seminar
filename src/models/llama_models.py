@@ -308,14 +308,14 @@ class Transformer(nn.Module):
         assert grid_size * grid_size == self.block_size
         self.freqs_cis = precompute_freqs_cis_2d(grid_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
 
-        #self.initialize_weights()
+        self.initialize_weights()
 
     def initialize_weights(self):        
         # Initialize nn.Linear and nn.Embedding
         self.apply(self._init_weights)
 
         # Zero-out output layers:
-        nn.init.constant_(self.output.weight, 0)
+        nn.init.normal_(self.output.weight, mean=0.0, std=self.config.initializer_range)
 
     def _init_weights(self, module):
         std = self.config.initializer_range
