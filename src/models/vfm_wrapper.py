@@ -59,11 +59,12 @@ class CatFlow(nn.Module):
         :param x0: starting point sampled from N(0, I).
         :param x1: observation
         """
+        device = x.device
         dims = [1]*(len(x.shape)-1)
         t = t.view(-1, *dims)
         values = t.expand(-1, x1.shape[1], 1)
         x_scaled = x * (1 - (1 - self.sigma_min) * t)
-        return x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype))
+        return x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype).to(device))
     
     def conditional_velocity(self, t, x, x1, eps=1e-7):
         """
@@ -143,7 +144,7 @@ class LlamaCatFlow(CatFlow):
         '''
         
         num_classes = vq_model.config.codebook_size
-        if not p0:
+        if p0 is None:
             p0 = torch.distributions.MultivariateNormal(torch.zeros(num_classes), torch.eye(num_classes))
         super().__init__(model, p0, obs_dim)
  
@@ -156,7 +157,7 @@ class LlamaCatFlow(CatFlow):
         '''
         t = self.process_timesteps(t, x)
         dims = [1]*(len(x.shape)-1)
-        logits,_ = self.model(x, t, cond_idx)
+        logits = self.model(t, x, cond_idx)
         return (self.softmax(logits) - x)/(1-t.view(-1, *dims) + self.eps_)
 
     def generate(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):

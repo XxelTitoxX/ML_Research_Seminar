@@ -28,24 +28,9 @@ def load_cifar10(batch_size):
 def to_one_hot(c, k):
     return F.one_hot(c, num_classes=k).float()
 
-def catflow_loss(model, x1_indices, cond_idx, k, device):
-    b, seq_len = x1_indices.shape
-    x1 = to_one_hot(x1_indices, k).to(device)
-    
-    x0 = torch.randn_like(x1)
-    t = torch.rand((b, 1, 1), device=device)
-    x_t = t * x1 + (1.0 - t) * x0
-    
-    logits, _ = model(x_t, t.squeeze(-1), cond_idx)
-    if cond_idx:
-        logits = logits[:, 1:, :]
-    
-    loss = F.cross_entropy(logits.reshape(-1, k), x1_indices.view(-1).to(device))
-    return loss
-
 @torch.no_grad()
 def save_samples(vfm_wrapper, vq_model, step, device, n_samples=2):
-    images = vfm_wrapper.generate(n_samples=n_samples)
+    imgs = vfm_wrapper.generate(n_samples=n_samples)
 
     imgs = (imgs.clamp(-1, 1) + 1) / 2
     os.makedirs("samples", exist_ok=True)
@@ -53,12 +38,17 @@ def save_samples(vfm_wrapper, vq_model, step, device, n_samples=2):
     utils.save_image(grid, f"samples/step_{step}.png")
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     
     vocab_size = 16384
     num_classes = 10 
     block_size = 16 
-    batch_size = 64
+    batch_size = 16
     n_steps = 10000
     sample_every = 500
     lr = 1e-4
@@ -76,13 +66,10 @@ def main():
     
     llama_checkpoint_path = hf_hub_download(repo_id="FoundationVision/LlamaGen", filename="c2i_B_256.pt", cache_dir="src/checkpoints")
     model.load_state_dict(torch.load(llama_checkpoint_path, map_location=device), strict=False)
+    
     model.train()
 
     vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(16,))
-    '''
-    print("test wrapper")
-    out = vfm_wrapper.generate(n_samples=10)
-    '''
     
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     dataloader = load_cifar10(batch_size)
@@ -103,11 +90,14 @@ def main():
         with torch.no_grad():
             quant, _, (_, _, idx) = vq_model.encode(images)
             x1_indices = idx.view(batch_size, -1)
-
-        loss = catflow_loss(model, x1_indices, cond_idx=None, k=vocab_size, device=device) #remove none to use class conditioning
         
+        x0 = torch.randn_like(to_one_hot(x1_indices, k=vq_model.config.codebook_size)).to(device)
+        t = torch.rand(batch_size, device=device) 
+        loss = vfm_wrapper.criterion(t,x0,x1_indices) 
+  
         opt.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
         
         if step % 10 == 0:
