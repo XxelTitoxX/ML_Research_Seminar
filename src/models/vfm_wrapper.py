@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from torchdiffeq import odeint_adjoint as odeint
-
+from torchdiffeq import odeint 
+import torch.nn.functional as F
 
 class CatFlow(nn.Module):
     def __init__(self, model, p0, obs_dim=(2,), sigma_min=1e-10, n_samples=10):
@@ -51,31 +51,12 @@ class CatFlow(nn.Module):
         mean_div = torch.stack(div_estimates).mean(dim=0)
         return ((-v).detach(), mean_div)
 
-    def conditional_flow(self, t, x, x1):
-        """
-        Computes \\phi(t,x) = \\sigma(t, x1)x + \\mu(t, x1), where \\phi(0,x) = x = x0
-        
-        :param t: timestep. Float in [0,1].
-        :param x0: starting point sampled from N(0, I).
-        :param x1: observation
-        """
-        device = x.device
-        dims = [1]*(len(x.shape)-1)
+    def conditional_flow(self, t, x0, x1_indices):
+    # x1_onehot: (B, seq_len, vocab_size)
+        x1_onehot = F.one_hot(x1_indices, num_classes=x0.shape[-1]).float()
+        dims = [1] * (len(x0.shape) - 1)
         t = t.view(-1, *dims)
-        values = t.expand(-1, x1.shape[1], 1)
-        x_scaled = x * (1 - (1 - self.sigma_min) * t)
-        return x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype).to(device))
-    
-    def conditional_velocity(self, t, x, x1, eps=1e-7):
-        """
-        Computes (x1-x)/(1-t) =  - (x-x1)/(1-t) = - (x/(1-t) - x1/(1-t))
-        """
-        dims = [1]*(len(x.shape)-1)
-        t = t.view(-1, *dims)
-        denom = 1-t.expand(-1, x1.shape[1], 1) + eps
-        values = - 1.0/denom
-        x_scaled = x/denom
-        return -x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype))
+        return t * x1_onehot + (1 - t) * x0
     
     # def target_velocity(self, t, x, x1):
     #     return self.conditional_velocity(t, self.conditional_flow(t, x, x1), x1)
@@ -91,13 +72,39 @@ class CatFlow(nn.Module):
         return self.cross_entropy(output.transpose(1, 2), x1)/x0.shape[0]
 
     
-    def sample(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):
+    def sample(self, n_samples, n_steps=100, method='midpoint'):
         self.device = next(self.parameters()).device
-        x0 = self.p0.sample([n_samples]+list(self.obs_dim)).to(self.device)
-        t = torch.linspace(0,1-self.eps_,100, device=self.device)
-        with torch.no_grad():
-            return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
+        seq_len = self.obs_dim[0]
+        vocab_size = self.p0.mean.shape[0]
+        x = torch.randn(n_samples, seq_len, vocab_size, device=self.device)
         
+        ts = torch.linspace(0, 0.99, n_steps, device=self.device)
+        dt = ts[1] - ts[0]
+        
+        with torch.no_grad():
+            for i, t in enumerate(ts[:-1]):
+                t_batch = t.expand(n_samples)
+                
+                if method == 'euler':
+                    v = self.velocity(t_batch, x)
+                    x = x + dt * v
+                    
+                elif method == 'midpoint':
+                    v1 = self.velocity(t_batch, x)
+                    x_mid = x + (dt / 2) * v1
+                    t_mid = (t + dt / 2).expand(n_samples)
+                    v2 = self.velocity(t_mid, x_mid)
+                    x = x + dt * v2
+                    
+                elif method == 'rk4':
+                    v1 = self.velocity(t_batch, x)
+                    v2 = self.velocity((t + dt/2).expand(n_samples), x + dt/2 * v1)
+                    v3 = self.velocity((t + dt/2).expand(n_samples), x + dt/2 * v2)
+                    v4 = self.velocity((t + dt).expand(n_samples), x + dt * v3)
+                    x = x + (dt / 6) * (v1 + 2*v2 + 2*v3 + v4)
+        
+        return x
+            
 
     def approx_div(self, f_x, x, retain_graph=True):
         z = torch.randint(low=0, high=2, size=x.shape).to(x) * 2 - 1
@@ -151,17 +158,17 @@ class LlamaCatFlow(CatFlow):
         self.vq_model = vq_model
 
     def velocity(self, t, x, cond_idx=None):
-        '''
-        t: timestep
-        x: x_t, current point
-        '''
+        if len(t.shape) == 0 or t.shape[0] != x.shape[0]:
+            t = t.expand(x.shape[0])
         t = self.process_timesteps(t, x)
         dims = [1]*(len(x.shape)-1)
         logits = self.model(t, x, cond_idx)
-        return (self.softmax(logits) - x)/(1-t.view(-1, *dims) + self.eps_)
+        velocity = (self.softmax(logits) - x) / (1 - t.view(-1, *dims) + self.eps_)
+        #print(f"velocity[0,0,:3]={velocity[0,0,:3].tolist()}")
+        return velocity
 
-    def generate(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):
-        logits = self.sample(n_samples, method=method, rtol=rtol, atol=atol)
+    def generate(self, n_samples, method='euler', rtol=1e-5, atol=1e-5):
+        logits = self.sample(n_samples, method=method)
 
         indices = torch.argmax(logits, dim=-1)
         block_size = self.obs_dim[0]
