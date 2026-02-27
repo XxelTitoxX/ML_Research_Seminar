@@ -308,7 +308,7 @@ class Transformer(nn.Module):
         assert grid_size * grid_size == self.block_size
         self.freqs_cis = precompute_freqs_cis_2d(grid_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
 
-        self.initialize_weights()
+        #self.initialize_weights()
 
     def initialize_weights(self):        
         # Initialize nn.Linear and nn.Embedding
@@ -328,16 +328,15 @@ class Transformer(nn.Module):
 
     def forward(
         self, 
-        x_t: torch.Tensor,     
-        t: torch.Tensor,         
+        t: torch.Tensor, 
+        x_t: torch.Tensor,             
         cond_idx: Optional[torch.Tensor] = None, 
-        targets: Optional[torch.Tensor] = None,
     ):
        
         token_embeddings = self.tok_embeddings(x_t)
         t_embed = self.time_embed(t.view(-1, 1)).unsqueeze(1)
 
-        if cond_idx:
+        if cond_idx is not None:
             cond_embeddings = self.cls_embedding(cond_idx, train=self.training)[:, :self.cls_token_num]
             h = torch.cat((cond_embeddings, token_embeddings), dim=1)
         else :
@@ -349,7 +348,7 @@ class Transformer(nn.Module):
         seq_len = h.shape[1]
         freqs_cis = self.freqs_cis[:seq_len].to(h.device)
 
-        mask = self.causal_mask[:, :seq_len, :seq_len].to(h.device)
+        mask =torch.ones(seq_len, seq_len, dtype=torch.bool, device=h.device)
 
         for layer in self.layers:
             h = layer(h, freqs_cis, mask=mask)
@@ -359,11 +358,7 @@ class Transformer(nn.Module):
         
         logits = logits[:, self.cls_token_num - 1:].contiguous()
 
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-
-        return logits, loss
+        return logits
 
 
     def get_fsdp_wrap_module_list(self) -> List[nn.Module]:
