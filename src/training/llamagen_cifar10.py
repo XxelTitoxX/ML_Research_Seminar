@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from models.llama_models import GPT_B
-from models.vq_model import VQ_8
+from models.vq_model import VQ_Cifar
 from models.vfm_wrapper import LlamaCatFlow
 
 def load_cifar10(batch_size):
@@ -47,9 +47,9 @@ def main():
         device = torch.device("cpu")
     
     config = dict(
-        vocab_size=16384,
+        vocab_size=512,
         num_classes=10,
-        block_size=16,
+        block_size=64,
         batch_size=128,
         n_epochs=200,
         sample_every_steps=500,
@@ -71,9 +71,9 @@ def main():
     grad_clip = config["grad_clip"]
     resume_checkpoint = config["resume_checkpoint"]
 
-    vq_model = VQ_8().to(device)
-    vq_checkpoint_path = hf_hub_download(repo_id="GAD-cell/VQ_VAE_8", filename="vq_ds8_c2i.pt", cache_dir="src/checkpoints")
-    vq_model.load_state_dict(torch.load(vq_checkpoint_path, map_location=device)["model"])
+    vq_model = VQ_Cifar().to(device)
+    vq_checkpoint_path = hf_hub_download(repo_id="GAD-cell/vq-vae-cifar10-rfid15", filename="vq_cifar_final.pt", cache_dir="src/checkpoints")
+    vq_model.load_state_dict(torch.load(vq_checkpoint_path, map_location=device))
     vq_model.eval()
 
     model = GPT_B(
@@ -83,7 +83,7 @@ def main():
     ).to(device)
     model.train()
 
-    vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(16,))
+    vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(config["block_size"],))
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
     dataloader = load_cifar10(batch_size)
     
@@ -97,7 +97,8 @@ def main():
         start_epoch = checkpoint["epoch"]
         global_step = start_epoch * len(dataloader)
         print(f"Reprise depuis l'epoque {start_epoch}")
-
+    
+    codebook = vfm_wrapper.get_codebook()
     for epoch in range(1, n_epochs + 1):
         epoch_loss = 0.0
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{n_epochs}")
@@ -109,11 +110,10 @@ def main():
             with torch.no_grad():
                 quant, _, (_, _, idx) = vq_model.encode(images)
                 x1_indices = idx.view(images.shape[0], -1)
-                codebook = vfm_wrapper.get_codebook()
                 x1_embeddings = F.embedding(x1_indices, codebook)
                 cb_std = codebook.std().item()
 
-            x0 = torch.randn_like(x1_embeddings).to(device) * cb_std
+            x0 = torch.randn_like(x1_embeddings).to(device) 
             t = torch.rand(images.shape[0], device=device)
             
             loss = vfm_wrapper.criterion(t, x0, x1_embeddings, x1_indices, cond_idx)
