@@ -8,12 +8,27 @@
 from dataclasses import dataclass
 from typing import Optional, List
 
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+import math
 
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+    
 def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
 
@@ -282,11 +297,7 @@ class Transformer(nn.Module):
             raise Exception("please check model type")
         self.tok_embeddings = nn.Linear(config.vocab_size, config.dim)
         self.tok_dropout = nn.Dropout(config.token_dropout_p)
-        self.time_embed = nn.Sequential(
-            nn.Linear(1, 256),
-            nn.SiLU(),
-            nn.Linear(256, config.dim)
-        )
+        self.time_emb = SinusoidalPosEmb(config.dim)
         
         self.max_batch_size = 12
         self.max_seq_length = self.cls_token_num + self.block_size
@@ -334,7 +345,7 @@ class Transformer(nn.Module):
     ):
        
         token_embeddings = self.tok_embeddings(x_t)
-        t_embed = self.time_embed(t.view(-1, 1)).unsqueeze(1)
+        t_embed = self.time_emb(t).unsqueeze(1)
 
         if cond_idx is not None:
             cond_embeddings = self.cls_embedding(cond_idx, train=self.training)[:, :self.cls_token_num]

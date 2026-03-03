@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms, utils
 from torch.utils.data import DataLoader
 from huggingface_hub import hf_hub_download
+from datasets import load_dataset
 import sys
 from pathlib import Path
 from tqdm import tqdm
@@ -18,19 +19,33 @@ from models.llama_models import GPT_B
 from models.vq_model import VQ_8
 from models.vfm_wrapper import LlamaCatFlow
 
-def load_cifar10(batch_size):
+def load_imagenet64(batch_size):
+    dataset = load_dataset("student/ImageNet-64", split="validation")
+    
     transform = transforms.Compose([
-        transforms.Resize(32),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
-    dataset = datasets.CIFAR10(root="./data", train=True, download=True, transform=transform)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+
+    def transform_batch(examples):
+        examples["pixel_values"] = [transform(img.convert("RGB")) for img in examples["png"]]
+        return examples
+
+    dataset.set_transform(transform_batch)
+
+    def collate_fn(batch):
+        images = torch.stack([item["pixel_values"] for item in batch])
+        labels = torch.tensor([0 for item in batch])
+        return images, labels
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
+
+def to_one_hot(c, k):
+    return F.one_hot(c, num_classes=k).float()
 
 @torch.no_grad()
-def save_samples(vfm_wrapper, vq_model, epoch, step, device, n_samples=4, num_classes=10):
-    cond_idx = torch.randint(0, num_classes, (n_samples,), device=device)
-    imgs = vfm_wrapper.generate(n_samples=n_samples, cond_idx=cond_idx)
+def save_samples(vfm_wrapper, vq_model, epoch, step, device, n_samples=4):
+    imgs = vfm_wrapper.generate(n_samples=n_samples)
     imgs = (imgs.clamp(-1, 1) + 1) / 2
     os.makedirs("samples", exist_ok=True)
     grid = utils.make_grid(imgs, nrow=n_samples)
@@ -48,14 +63,13 @@ def main():
     
     config = dict(
         vocab_size=16384,
-        num_classes=10,
-        block_size=16,
+        num_classes=1000,
+        block_size=64,
         batch_size=128,
         n_epochs=200,
         sample_every_steps=500,
-        save_every_epochs=50,
         lr=1e-4,
-        grad_clip=5.0,
+        grad_clip=1.0,
         resume_checkpoint=None,
     )
 
@@ -84,8 +98,8 @@ def main():
     model.train()
 
     vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(16,))
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
-    dataloader = load_cifar10(batch_size)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    dataloader = load_imagenet64(batch_size)
     
     start_epoch = 0
     global_step = 0
@@ -98,6 +112,8 @@ def main():
         global_step = start_epoch * len(dataloader)
         print(f"Reprise depuis l'epoque {start_epoch}")
 
+    noise_std = 1.0 / np.sqrt(vocab_size)
+
     for epoch in range(1, n_epochs + 1):
         epoch_loss = 0.0
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{n_epochs}")
@@ -109,14 +125,11 @@ def main():
             with torch.no_grad():
                 quant, _, (_, _, idx) = vq_model.encode(images)
                 x1_indices = idx.view(images.shape[0], -1)
-                codebook = vfm_wrapper.get_codebook()
-                x1_embeddings = F.embedding(x1_indices, codebook)
-                cb_std = codebook.std().item()
-
-            x0 = torch.randn_like(x1_embeddings).to(device) * cb_std
+            
+            x0 = (torch.randn_like(to_one_hot(x1_indices, k=vq_model.config.codebook_size))* noise_std).to(device)
             t = torch.rand(images.shape[0], device=device)
             
-            loss = vfm_wrapper.criterion(t, x0, x1_embeddings, x1_indices, cond_idx)
+            loss = vfm_wrapper.criterion(t, x0, x1_indices)
             
             opt.zero_grad()
             loss.backward()
@@ -136,13 +149,13 @@ def main():
             if global_step % config["sample_every_steps"] == 0:
                 model.eval()
                 with torch.no_grad():
-                    sample_cond = torch.randint(0, num_classes, (4,), device=device)
-                    imgs = vfm_wrapper.generate(n_samples=4, cond_idx=sample_cond)
+                    imgs = vfm_wrapper.generate(n_samples=4)
                     imgs = (imgs.clamp(-1, 1) + 1) / 2
                     grid = utils.make_grid(imgs, nrow=4)
                     wandb.log({"samples": wandb.Image(grid)}, step=global_step)
                 model.train()
 
+        
         avg_loss = epoch_loss / len(dataloader)
         wandb.log({
             "epoch/avg_loss": avg_loss,
@@ -150,8 +163,9 @@ def main():
         }, step=global_step)
         print(f"Epoch {epoch} | avg_loss {avg_loss:.4f}")
 
+
         os.makedirs("checkpoints", exist_ok=True)
-        if epoch % config["save_every_epochs"] == 0:
+        if epoch % 10 == 0:
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
