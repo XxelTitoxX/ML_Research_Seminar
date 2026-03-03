@@ -421,4 +421,7 @@ def VQ_8(**kwargs):
 def VQ_16(**kwargs):
     return VQModel(ModelArgs(encoder_ch_mult=[1, 1, 2, 2, 4], decoder_ch_mult=[1, 1, 2, 2, 4], **kwargs))
 
+def VQ_Cifar(**kwargs):
+    return VQModel(ModelArgs(encoder_ch_mult=[1, 2, 2], decoder_ch_mult=[1, 2, 2], codebook_size=512, z_channels=128, **kwargs))
+
 VQ_models = {'VQ-16': VQ_16, 'VQ-8': VQ_8}

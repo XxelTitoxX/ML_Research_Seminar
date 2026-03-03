@@ -3,3 +3,5 @@ torch
 torchvision
 numpy
 mlflow
+torchdiffeq
+huggingface_hub
