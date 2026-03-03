@@ -80,6 +80,7 @@ class ModelArgs:
     rope_base: float = 10000
     norm_eps: float = 1e-5
     initializer_range: float = 0.02
+    vq_emb_dim: int = 512
     
     token_dropout_p: float = 0.1
     attn_dropout_p: float = 0.0
@@ -289,17 +290,18 @@ class Transformer(nn.Module):
         self.num_classes = config.num_classes
         self.model_type = config.model_type
         self.cls_token_num = config.cls_token_num
+        self.vq_emb_dim = config.vq_emb_dim
         if self.model_type == 'c2i':
             self.cls_embedding = LabelEmbedder(config.num_classes, config.dim, config.class_dropout_prob)
         elif self.model_type == 't2i':
             self.cls_embedding = CaptionEmbedder(config.caption_dim, config.dim, config.class_dropout_prob)
         else:
             raise Exception("please check model type")
-        self.tok_embeddings = nn.Linear(config.vocab_size, config.dim)
+        self.tok_embeddings = nn.Linear(config.vq_emb_dim, config.dim)
         self.tok_dropout = nn.Dropout(config.token_dropout_p)
         self.time_emb = SinusoidalPosEmb(config.dim)
         
-        self.max_batch_size = 12
+        self.max_batch_size = config.max_batch_size
         self.max_seq_length = self.cls_token_num + self.block_size
         causal_mask = torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool)
         self.causal_mask = causal_mask.unsqueeze(0).repeat(self.max_batch_size, 1, 1)

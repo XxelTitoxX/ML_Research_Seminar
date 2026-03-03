@@ -6,6 +6,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 import sys
 import os
 from pathlib import Path
+import lpips
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -39,6 +40,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
     model = VQ_Cifar().to(device)
+    perceptual_loss_fn = lpips.LPIPS(net='vgg').to(device)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
     transform = transforms.Compose([
@@ -48,10 +51,10 @@ def main():
     ])
 
     train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=4)
 
     test_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
 
     os.makedirs("checkpoints", exist_ok=True)
 
@@ -63,27 +66,29 @@ def main():
             reconstructed, (vq_loss, commit_loss, entropy_loss, usage) = model(images)
             
             recon_loss = F.mse_loss(reconstructed, images)
+            p_loss = perceptual_loss_fn(reconstructed, images).mean()
             
-            loss = recon_loss + vq_loss + commit_loss
+            loss = recon_loss + 0.1 * p_loss + vq_loss + commit_loss
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
             if i % 100 == 0:
-                print(f"Epoch [{epoch}] | Total Loss: {loss.item():.4f} | Recon: {recon_loss.item():.4f} | Usage: {usage:.2%}")
+                print(f"Epoch [{epoch}] | Total: {loss.item():.4f} | Recon: {recon_loss.item():.4f} | LPIPS: {p_loss.item():.4f} | Usage: {usage:.2%}")
         
         print(f"\n rFID at epoch {epoch}...")
         rfid_score = evaluate_rfid(model, test_loader, device)
         print(f"--- epoch {epoch} | rFID: {rfid_score:.4f} ---")
         
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss.item(),
-            'rfid': rfid_score
-        }, f"checkpoints/vq_cifar_epoch_{epoch}.pt")
+        if epoch % 10 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss.item(),
+                'rfid': rfid_score
+            }, f"checkpoints/vq_cifar_epoch_{epoch}.pt")
 
     torch.save(model.state_dict(), "checkpoints/vq_cifar_final.pt")
 

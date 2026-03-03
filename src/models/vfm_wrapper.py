@@ -32,7 +32,7 @@ class CatFlow(nn.Module):
         return (e_dzdx * z).view(z.shape[0], -1).sum(dim=1)
 
 class LlamaCatFlow(CatFlow):
-    def __init__(self, model, vq_model, obs_dim=(16,), temperature=1.0):
+    def __init__(self, model, vq_model, obs_dim=(16,), temperature=0.8):
         super().__init__(model, obs_dim)
         self.temperature = temperature
         self.vq_model = vq_model
@@ -78,9 +78,11 @@ class LlamaCatFlow(CatFlow):
         self.device = next(self.parameters()).device
         seq_len = self.obs_dim[0]
 
-        x = torch.randn(n_samples, seq_len, self.embed_dim, device=self.device)
+        codebook = self.get_codebook()
+        cb_std = codebook.std().item()
+        x = torch.randn(n_samples, seq_len, self.embed_dim, device=self.device) 
         
-        ts = torch.linspace(0, 0.99, n_steps, device=self.device)
+        ts = torch.linspace(0, 1.0, n_steps, device=self.device)
         dt = ts[1] - ts[0]
         
         with torch.no_grad():
@@ -107,20 +109,23 @@ class LlamaCatFlow(CatFlow):
         
         return x
 
-    def generate(self, n_samples, cond_idx=None, temperature=1.0, method='midpoint', n_steps=100):
-        self.temperature = temperature
-        x_final = self.sample(n_samples, cond_idx=cond_idx, method=method, n_steps=n_steps)
-        
-        t_final = torch.ones(n_samples, device=self.device) * 0.99
-        logits = self.model(t_final, x_final)
-        probs = self.softmax(logits)
-        print(f"max prob: {probs.max().item():.4f}, min prob: {probs.min().item():.4f}")
-        print(f"first 5 probs: {probs[0, :5, :5]}")
-        indices = torch.argmax(logits, dim=-1)
-        block_size = self.obs_dim[0]
-        h = int(block_size**0.5)
-        w = h
-        indices = indices.reshape(n_samples, h, w)
+    def generate(self, n_samples, cond_idx=None, method='midpoint', n_steps=100):
+            x_final = self.sample(n_samples, cond_idx=cond_idx, method=method, n_steps=n_steps)
+            
+            codebook = self.vq_model.quantize.embedding.weight
+            
+            x_final_flat = x_final.reshape(-1, codebook.shape[-1])
+            
+            d = torch.sum(x_final_flat ** 2, dim=1, keepdim=True) + \
+                torch.sum(codebook ** 2, dim=1) - 2 * \
+                torch.matmul(x_final_flat, codebook.t())
+                
+            indices = torch.argmin(d, dim=1)
+            
+            block_size = self.obs_dim[0]
+            h = int(block_size**0.5)
+            w = h
+            indices = indices.reshape(n_samples, h, w)
 
-        decoded_img = self.vq_model.decode_code(indices, shape=(n_samples, -1, h, w))
-        return decoded_img
+            decoded_img = self.vq_model.decode_code(indices, shape=(n_samples, -1, h, w))
+            return decoded_img
