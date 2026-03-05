@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from models.vq_model import VQ_Cifar
+from models.vq_model import VQ_Cifar, VQ_Cifar_L
 
 def evaluate_rfid(model, dataloader, device):
     fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
@@ -39,7 +39,7 @@ def evaluate_rfid(model, dataloader, device):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
-    model = VQ_Cifar().to(device)
+    model = VQ_Cifar_L().to(device)
     perceptual_loss_fn = lpips.LPIPS(net='vgg').to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, betas=(0.5, 0.9))
@@ -68,7 +68,7 @@ def main():
             recon_loss = F.mse_loss(reconstructed, images)
             p_loss = perceptual_loss_fn(reconstructed, images).mean()
             
-            loss = recon_loss + 0.1 * p_loss + vq_loss + commit_loss
+            loss = recon_loss + 0.4 * p_loss + vq_loss + 1.2*commit_loss
             
             optimizer.zero_grad()
             loss.backward()

@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from models.llama_models import GPT_B
-from models.vq_model import VQ_Cifar
+from models.vq_model import VQ_Cifar, VQ_Cifar_L
 from models.vfm_wrapper import LlamaCatFlow
 
 def load_cifar10(batch_size):
@@ -49,14 +49,15 @@ def main():
     config = dict(
         vocab_size=512,
         num_classes=10,
-        block_size=64,
-        batch_size=128,
+        block_size=256,
+        batch_size=64,
         n_epochs=200,
         sample_every_steps=500,
         save_every_epochs=50,
         lr=1e-4,
         grad_clip=5.0,
-        resume_checkpoint=None,
+        resume_checkpoint="checkpoints/epoch_150.pt", 
+        #resume_checkpoint=None,
     )
 
     wandb.init(project="catflow-cifar10", config=config)
@@ -71,9 +72,10 @@ def main():
     grad_clip = config["grad_clip"]
     resume_checkpoint = config["resume_checkpoint"]
 
-    vq_model = VQ_Cifar().to(device)
-    vq_checkpoint_path = hf_hub_download(repo_id="GAD-cell/vq-vae-cifar10-rfid15", filename="vq_cifar_final.pt", cache_dir="src/checkpoints")
-    vq_model.load_state_dict(torch.load(vq_checkpoint_path, map_location=device))
+    vq_model = VQ_Cifar_L().to(device)
+    #vq_checkpoint_path = hf_hub_download(repo_id="GAD-cell/vq-vae-cifar10-rfid15", filename="vq_cifar_final.pt", cache_dir="src/checkpoints")
+    vq_checkpoint_path = "checkpoints/vq_cifar_epoch_20.pt"
+    vq_model.load_state_dict(torch.load(vq_checkpoint_path, map_location=device)["model_state_dict"])
     vq_model.eval()
 
     model = GPT_B(
@@ -92,8 +94,8 @@ def main():
 
     if resume_checkpoint and os.path.exists(resume_checkpoint):
         checkpoint = torch.load(resume_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        opt.load_state_dict(checkpoint["optimizer_state_dict"])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        #opt.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"]
         global_step = start_epoch * len(dataloader)
         print(f"Reprise depuis l'epoque {start_epoch}")
