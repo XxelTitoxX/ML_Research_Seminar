@@ -80,7 +80,7 @@ class ModelArgs:
     rope_base: float = 10000
     norm_eps: float = 1e-5
     initializer_range: float = 0.02
-    vq_emb_dim: int = 512
+    vq_emb_dim: int = 32
     
     token_dropout_p: float = 0.1
     attn_dropout_p: float = 0.0
@@ -274,9 +274,16 @@ class TransformerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(
-        self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        h = x + self.drop_path(self.attention(self.attention_norm(x), freqs_cis, mask))
-        out = h + self.drop_path(self.feed_forward(self.ffn_norm(h)))
+        self, x: torch.Tensor, freqs_cis: torch.Tensor, cond: torch.Tensor, mask: Optional[torch.Tensor] = None):
+
+        shift_msa, scale_msa, shift_mlp, scale_mlp = cond.chunk(4, dim=-1)
+
+        norm_x = self.attention_norm(x) * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+        h = x + self.drop_path(self.attention(norm_x, freqs_cis, mask))
+    
+        norm_h = self.ffn_norm(h) * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
+        out = h + self.drop_path(self.feed_forward(norm_h))
+
         return out
 
 
@@ -297,6 +304,7 @@ class Transformer(nn.Module):
             self.cls_embedding = CaptionEmbedder(config.caption_dim, config.dim, config.class_dropout_prob)
         else:
             raise Exception("please check model type")
+        self.tok_norm = RMSNorm(config.vq_emb_dim, eps=config.norm_eps)
         self.tok_embeddings = nn.Linear(config.vq_emb_dim, config.dim)
         self.tok_dropout = nn.Dropout(config.token_dropout_p)
         self.time_emb = SinusoidalPosEmb(config.dim)
@@ -320,6 +328,11 @@ class Transformer(nn.Module):
         grid_size = int(self.block_size ** 0.5)
         assert grid_size * grid_size == self.block_size
         self.freqs_cis = precompute_freqs_cis_2d(grid_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
+
+        self.condition_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(config.dim, config.dim * 4)
+        )
 
         self.initialize_weights()
 
@@ -345,32 +358,36 @@ class Transformer(nn.Module):
         x_t: torch.Tensor,             
         cond_idx: Optional[torch.Tensor] = None, 
     ):
-       
-        token_embeddings = self.tok_embeddings(x_t)
-        t_embed = self.time_emb(t).unsqueeze(1)
+        token_embeddings = self.tok_norm(x_t)
+        token_embeddings = self.tok_embeddings(token_embeddings)
+        t_embed = self.time_emb(t)
 
         if cond_idx is not None:
             cond_embeddings = self.cls_embedding(cond_idx, train=self.training)[:, :self.cls_token_num]
             h = torch.cat((cond_embeddings, token_embeddings), dim=1)
-        else :
-           h =  token_embeddings
+            cond = self.condition_mlp(t_embed + cond_embeddings.squeeze(1))
+        else:
+            h = token_embeddings
+            cond = self.condition_mlp(t_embed)
 
-        h = h + t_embed
         h = self.tok_dropout(h)
         
         seq_len = h.shape[1]
         freqs_cis = self.freqs_cis[:seq_len].to(h.device)
 
-        mask =torch.ones(seq_len, seq_len, dtype=torch.bool, device=h.device)
+        mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=h.device)
 
         for layer in self.layers:
-            h = layer(h, freqs_cis, mask=mask)
+            h = layer(h, freqs_cis, cond, mask=mask)
         
         h = self.norm(h)
         logits = self.output(h).float()
         
-        logits = logits[:, self.cls_token_num - 1:].contiguous()
-
+        if cond_idx is not None:
+            logits = logits[:, self.cls_token_num:].contiguous()
+        else :
+            logits = logits.contiguous()
+            
         return logits
 
 

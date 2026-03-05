@@ -55,14 +55,17 @@ class LlamaCatFlow(CatFlow):
     def criterion(self, t, x0, x1, x1_indices, cond_idx=None):
         t = self.process_timesteps(t, x0)
         x_t = self.conditional_flow(t, x0, x1)
-        logits = self.model(t, x_t)
-        return self.cross_entropy(logits.transpose(1, 2), x1_indices)
+        logits = self.model(t, x_t, cond_idx=cond_idx)
+        log_z = torch.logsumexp(logits, dim=-1)
+        z_loss = 1e-4 * torch.mean(log_z**2)
+            
+        return self.cross_entropy(logits.transpose(1, 2), x1_indices) + z_loss
 
     def velocity(self, t, x, is_inference=False, cond_idx=None):
         t = self.process_timesteps(t, x)
         dims = [1] * (len(x.shape) - 1)
         
-        logits = self.model(t, x)
+        logits = self.model(t, x, cond_idx=cond_idx)
         if is_inference:
             logits = logits / self.temperature
             
