@@ -14,7 +14,7 @@ import plotly.express as px
 from src.models.fm_wrapper import FlowMatching
 from src.models.base_models import MLP
 
-from .utils import *
+from utils import *
 
 
 
@@ -78,6 +78,7 @@ def main(d=2, device='cpu'):
 
     fm = fm.to(device if torch.cuda.is_available() else 'cpu')
     samples_fm = fm.sample(train_data_length)
+    torch.save(fm, "fm.pt")
 
     df = pd.DataFrame(train_data)
     df['sample'] = 'ground truth'

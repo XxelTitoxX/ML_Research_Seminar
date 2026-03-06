@@ -9,6 +9,9 @@ import argparse
 import tqdm
 
 
+def shift_time(timesteps, shift_vals):
+    return (shift_vals * timesteps) / (1 + (shift_vals - 1) * timesteps)
+
 class SCFMWrapper(nn.Module):
     def __init__(self, net, order):
         super().__init__()
@@ -38,7 +41,7 @@ def vanilla_scfm(
     dataloader,
     nb_epochs,
     batch_size,
-    nb_teacher_steps,
+    n_steps,
     ratio_teacher_samples,
     s_range,
     device,
@@ -51,10 +54,9 @@ def vanilla_scfm(
     nb_teacher_samples = int(ratio_teacher_samples * batch_size)
     k_ratio = nb_teacher_samples / batch_size
     nb_student_samples = batch_size - nb_teacher_samples
-    timesteps = torch.linspace(0, 1, nb_teacher_steps + 1, device=device)
-    for epoch in range(nb_epochs):
-        print(f"Epoch {epoch}/{nb_epochs}")
-        for step, x_1 in tqdm.tqdm(enumerate(dataloader)):
+    timesteps = torch.linspace(0, 1, n_steps + 1, device=device)
+    for _ in tqdm.trange(nb_epochs):
+        for step, x_1 in enumerate(dataloader):
             x_1 = x_1.to(device)
             optimizer.zero_grad()
             if vae:
@@ -65,14 +67,14 @@ def vanilla_scfm(
 
             # Part A: Teacher (Skip = 1)
             j_teacher = torch.randint(
-                0, nb_teacher_steps - 1, (nb_teacher_samples,), device=device
+                0, n_steps - 1, (nb_teacher_samples,), device=device
             )
             t1_idx_T = j_teacher
             t2_idx_T = j_teacher + 1
             t3_idx_T = j_teacher + 2
 
             # Part B: Student (Random Stride)
-            max_power = int(math.log2(nb_teacher_steps)) - 1
+            max_power = int(math.log2(n_steps)) - 1
             powers = torch.randint(
                 1, max_power + 1, (nb_student_samples,), device=device
             )
@@ -81,7 +83,7 @@ def vanilla_scfm(
             # 2. Sample j such that j + 2*stride <= n
             #    max_j = n - 2*stride
             #    We generate a random float [0, 1] and map it to the valid range for each stride
-            max_j = nb_teacher_steps - 2 * strides
+            max_j = n_steps - 2 * strides
             random_floats = torch.rand(nb_student_samples, device=device)
             j_student = (random_floats * (max_j + 1)).long()  # +1 because floor
 
@@ -93,13 +95,9 @@ def vanilla_scfm(
             t2_idx = torch.cat([t2_idx_T, t2_idx_S])
             t3_idx = torch.cat([t3_idx_T, t3_idx_S])
 
-            def get_shifted_time(indices, shift_vals):
-                raw_t = timesteps[indices]
-                return (shift_vals * raw_t) / (1 + (shift_vals - 1) * raw_t)
-
-            t_1 = get_shifted_time(t1_idx, s).view(-1, 1)
-            t_2 = get_shifted_time(t2_idx, s).view(-1, 1)
-            t_3 = get_shifted_time(t3_idx, s).view(-1, 1)
+            t_1 = shift_time(timesteps[t1_idx], s).view(-1, 1)
+            t_2 = shift_time(timesteps[t2_idx], s).view(-1, 1)
+            t_3 = shift_time(timesteps[t3_idx], s).view(-1, 1)
 
             x_t1 = (1 - t_1) * x_0 + t_1 * x_1
 
@@ -171,7 +169,7 @@ def dual_ema_scfm(
     dataloader,
     nb_epochs,
     batch_size,
-    nb_teacher_steps,
+    n_steps,
     ratio_teacher_samples,
     s_range,
     device,
@@ -182,13 +180,12 @@ def dual_ema_scfm(
     nb_teacher_samples = int(ratio_teacher_samples * batch_size)
     k_ratio = nb_teacher_samples / batch_size
     nb_student_samples = batch_size - nb_teacher_samples
-    timesteps = torch.linspace(0, 1, nb_teacher_steps + 1, device=device)
+    timesteps = torch.linspace(0, 1, n_steps + 1, device=device)
 
-    for epoch in range(nb_epochs):
-        print(f"Epoch {epoch}/{nb_epochs}")
-        for _, x_1 in tqdm.tqdm(enumerate(dataloader)):
+    for _ in tqdm.trange(nb_epochs):
+        for _, x_1 in enumerate(dataloader):
             optimizer.zero_grad()
-            x_1 = next(dataloader).to(device)
+            x_1 = x_1.to(device)
             if vae:
                 x_1 = vae.encode(x_1).latent_dist.sample()
                 x_1 = x_1 * vae.config.scaling_factor
@@ -198,14 +195,14 @@ def dual_ema_scfm(
 
             # Part A: Teacher (Skip = 1)
             j_teacher = torch.randint(
-                0, nb_teacher_steps - 1, (nb_teacher_samples,), device=device
+                0, n_steps - 1, (nb_teacher_samples,), device=device
             )
             t1_idx_T = j_teacher
             t2_idx_T = j_teacher + 1
             t3_idx_T = j_teacher + 2
 
             # Part B: Student (Random Stride)
-            max_power = int(math.log2(nb_teacher_steps)) - 1
+            max_power = int(math.log2(n_steps)) - 1
             powers = torch.randint(
                 1, max_power + 1, (nb_student_samples,), device=device
             )
@@ -214,7 +211,7 @@ def dual_ema_scfm(
             # 2. Sample j such that j + 2*stride <= n
             #    max_j = n - 2*stride
             #    We generate a random float [0, 1] and map it to the valid range for each stride
-            max_j = nb_teacher_steps - 2 * strides
+            max_j = n_steps - 2 * strides
             random_floats = torch.rand(nb_student_samples, device=device)
             j_student = (random_floats * (max_j + 1)).long()  # +1 because floor
 
@@ -226,13 +223,9 @@ def dual_ema_scfm(
             t2_idx = torch.cat([t2_idx_T, t2_idx_S])
             t3_idx = torch.cat([t3_idx_T, t3_idx_S])
 
-            def get_shifted_time(indices, shift_vals):
-                raw_t = timesteps[indices]
-                return (shift_vals * raw_t) / (1 + (shift_vals - 1) * raw_t)
-
-            t_1 = get_shifted_time(t1_idx, s).view(-1, 1)
-            t_2 = get_shifted_time(t2_idx, s).view(-1, 1)
-            t_3 = get_shifted_time(t3_idx, s).view(-1, 1)
+            t_1 = shift_time(timesteps[t1_idx], s).view(-1, 1)
+            t_2 = shift_time(timesteps[t2_idx], s).view(-1, 1)
+            t_3 = shift_time(timesteps[t3_idx], s).view(-1, 1)
 
             x_t1 = (1 - t_1) * x_0 + t_1 * x_1
 
@@ -277,8 +270,8 @@ def dual_ema_scfm(
             scfm_loss.backward()
             optimizer.step()
 
-            slow_ema_net.update()
-            fast_ema_net.update()
+            slow_ema_net.update_parameters(student_net)
+            fast_ema_net.update_parameters(student_net)
 
             if run:
                 run.log(
@@ -290,6 +283,16 @@ def dual_ema_scfm(
                 )
     if run:
         run.finish()
+
+
+def sample(net, n_samples, dim, n_steps, s, device):
+    with torch.no_grad():
+        timesteps = torch.linspace(0, 1, n_steps + 1, device=device)
+        timesteps = shift_time(timesteps, s)
+        x_t = torch.randn((n_samples, dim), device=device)
+        for i in range(n_steps):
+            x_t = x_t + (timesteps[i+1]- timesteps[i]) * net(x_t, timesteps[i].repeat(n_samples))
+        return x_t
 
 
 def parse_args():
@@ -356,10 +359,10 @@ def parse_args():
         help="Distillation method.",
     )
     parser.add_argument(
-        "--nb_teacher_steps",
+        "--n_steps",
         type=int,
         default=32,
-        help="Number of teacher discrete steps (n).",
+        help="Number steps.",
     )
     parser.add_argument(
         "--ratio_teacher_samples",
@@ -494,7 +497,7 @@ def main(args):
             dataloader,
             args.nb_steps,
             args.batch_size,
-            args.nb_teacher_steps,
+            args.n_steps,
             args.ratio_teacher_samples,
             args.s_range,
             device,
@@ -514,7 +517,7 @@ def main(args):
             dataloader,
             args.nb_steps,
             args.batch_size,
-            args.nb_teacher_steps,
+            args.n_steps,
             args.ratio_teacher_samples,
             args.s_range,
             device,
