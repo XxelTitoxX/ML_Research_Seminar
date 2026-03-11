@@ -334,7 +334,7 @@ def evaluate(
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train CatFlow UNet on VQ-quantized CIFAR-10.")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--ckpt_every", type=int, default=5000)
@@ -508,7 +508,7 @@ def main() -> None:
                     embed_dim=codebook_embed_dim,
                     device=device,
                 )
-                wandb.log(metrics | {"train/step": step, "train/epoch": epoch}, step=step)
+                wandb.log(metrics, step=step)
                 print(
                     "[eval] "
                     + ", ".join([f"{k}={v:.4f}" for k, v in metrics.items()])

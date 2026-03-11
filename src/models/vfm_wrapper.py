@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
+from .ode import solve_ode
 
 
 class CatFlow(nn.Module):
@@ -113,7 +114,7 @@ class CatFlow(nn.Module):
         return self.cross_entropy(output.transpose(1, 2), x1) / (x0.shape[0] * x0.shape[1])
 
     
-    def sample(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):
+    def sample(self, n_samples, method='euler', rtol=1e-5, atol=1e-5):
         self.device = next(self.parameters()).device
         if self.p0 is not None and hasattr(self.p0, "sample"):
             x0 = self.p0.sample([n_samples] + list(self.obs_dim)).to(self.device)
@@ -121,7 +122,8 @@ class CatFlow(nn.Module):
             x0 = self.sample_prior(n_samples, *list(self.obs_dim), device=self.device)
         t = torch.linspace(0,1-self.eps_,10, device=self.device)
         with torch.no_grad():
-            return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
+            # return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
+            return solve_ode(self.velocity, x0, t, method=method)
         
 
     def approx_div(self, f_x, x, retain_graph=True):
