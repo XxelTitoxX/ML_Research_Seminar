@@ -114,6 +114,8 @@ def maybe_prepare_quantized_dataset(config: TrainConfig, device: torch.device, v
     vq_model.eval()
 
     pbar = tqdm(loader, desc="Quantizing CIFAR-10", unit="batch", disable=config.tqdm_disable)
+    print_perc = 0.0
+    n_batch = 0
     with torch.inference_mode():
         for images, _ in pbar:
             images = images.to(device)
@@ -123,7 +125,11 @@ def maybe_prepare_quantized_dataset(config: TrainConfig, device: torch.device, v
                 latent_h, latent_w = h, w
             batch_indices = _extract_indices_from_vq_info(info, b, h, w)
             all_indices.append(batch_indices.cpu().to(torch.int16))
-
+            curr_perc = (n_batch + 1) / len(pbar) * 100
+            if config.tqdm_disable and curr_perc >= print_perc:
+                print(f"[quant] Progress: {print_perc:.1f}%")
+                print_perc += 10.0
+            n_batch += 1
     if latent_h is None or latent_w is None:
         raise RuntimeError("No CIFAR-10 data was processed during quantization.")
 
