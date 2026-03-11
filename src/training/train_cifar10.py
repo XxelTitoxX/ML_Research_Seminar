@@ -317,8 +317,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--ckpt_every", type=int, default=1000)
-    parser.add_argument("--eval_every", type=int, default=2000)
+    parser.add_argument("--ckpt_every", type=int, default=5000)
+    parser.add_argument("--eval_every", type=int, default=1000)
     parser.add_argument("--eval_num_samples", type=int, default=5000)
     parser.add_argument("--num_channels", type=int, default=128)
     parser.add_argument("--proj_channels", type=int, default=64)
@@ -349,8 +349,7 @@ def main() -> None:
     config = parse_args()
     set_seed(config.seed)
     device = pick_device()
-    device = torch.device("cpu")
-
+    
     try:
         from torchcfm.models.unet.unet import UNetModelWrapper
     except Exception as exc:
