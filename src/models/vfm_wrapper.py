@@ -4,16 +4,38 @@ from torchdiffeq import odeint_adjoint as odeint
 
 
 class CatFlow(nn.Module):
-    def __init__(self, model, p0, obs_dim=(2,), sigma_min=1e-10, n_samples=10):
+    def __init__(self, model, p0=None, obs_dim=(2,), sigma_min=1e-10, n_samples=10, prior_eps=1e-4):
         super().__init__()
         self.model = model
         self.sigma_min = sigma_min
         self.obs_dim = obs_dim
         self.n_samples = n_samples
+        self.prior_eps = prior_eps
         self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
         self.eps_ = 1e-10
         self.softmax = nn.Softmax(-1)
+        # Optional external prior kept for backward compatibility.
         self.p0 = p0
+
+    @staticmethod
+    def sample_simplex(*sizes, device="cpu", eps=1e-4):
+        """Uniform sample on simplex via normalized exponential variables."""
+        x = torch.empty(*sizes, device=device, dtype=torch.float).exponential_(1)
+        p = x / x.sum(dim=-1, keepdim=True)
+        p = p.clamp(eps, 1 - eps)
+        return p / p.sum(dim=-1, keepdim=True)
+
+    def sample_prior(self, *size, device=None, eps=None):
+        if eps is None:
+            eps = self.prior_eps
+        if device is None:
+            device = next(self.parameters()).device
+        return self.sample_simplex(*size, device=device, eps=eps)
+
+    @staticmethod
+    def prior_logp0(p0, eps=1e-4):
+        # Uniform prior on simplex has constant log-density (ignored in differences).
+        return torch.zeros(p0.shape[0], device=p0.device, dtype=p0.dtype)
     
     def process_timesteps(self, t, x):
         if len(t.shape) == 0:
@@ -87,13 +109,17 @@ class CatFlow(nn.Module):
 
     def criterion(self, t, x0, x1):
         output = self.forward(t, x0, x1)
-        return self.cross_entropy(output.transpose(1, 2), x1)/x0.shape[0]
+        # Normalize by number of categorical variables for token-level CE.
+        return self.cross_entropy(output.transpose(1, 2), x1) / (x0.shape[0] * x0.shape[1])
 
     
     def sample(self, n_samples, method='midpoint', rtol=1e-5, atol=1e-5):
         self.device = next(self.parameters()).device
-        x0 = self.p0.sample([n_samples]+list(self.obs_dim)).to(self.device)
-        t = torch.linspace(0,1-self.eps_,100, device=self.device)
+        if self.p0 is not None and hasattr(self.p0, "sample"):
+            x0 = self.p0.sample([n_samples] + list(self.obs_dim)).to(self.device)
+        else:
+            x0 = self.sample_prior(n_samples, *list(self.obs_dim), device=self.device)
+        t = torch.linspace(0,1-self.eps_,10, device=self.device)
         with torch.no_grad():
             return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
         
@@ -117,7 +143,10 @@ class CatFlow(nn.Module):
             adjoint_params = self.model.parameters(),
             )
         phi, f = phi[-1].detach().cpu(), f[-1].detach().cpu().flatten()
-        logp_noise = self.p0.log_prob(phi)
+        if self.p0 is not None and hasattr(self.p0, "log_prob"):
+            logp_noise = self.p0.log_prob(phi)
+        else:
+            logp_noise = self.prior_logp0(phi, eps=self.prior_eps).cpu()
         return logp_noise - f
     
     def __str__(self):

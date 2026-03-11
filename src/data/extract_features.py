@@ -12,6 +12,7 @@ import argparse
 import os
 from pathlib import Path
 from typing import Tuple
+from tqdm import tqdm
 
 
 def _require_torchvision():
@@ -95,6 +96,88 @@ def _extract_features(model, dataloader, device: str):
     return features, paths
 
 
+def extract_cifar10_dinov2_features(
+    data_root: Path,
+    output_path: Path,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    device: str = "auto",
+    split: str = "train",
+):
+    """Extract DINOv2 features for CIFAR-10 and save to a single .pt file.
+
+    Saved format:
+      {
+        "features": Tensor [N, D],
+        "targets": Tensor [N],
+        "dataset": "cifar10",
+        "split": "train" | "test",
+        "model": "dinov2_vits14",
+      }
+    """
+    import torch
+    import torchvision
+    from torch.utils.data import DataLoader
+    from torchvision import transforms
+
+    split = split.lower()
+    if split not in {"train", "test"}:
+        raise ValueError(f"split must be 'train' or 'test', got: {split}")
+
+    run_device = _device_from_arg(device)
+    model, image_size, mean, std = _load_model("dinov2", run_device)
+
+    transform = transforms.Compose(
+        [
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+    dataset = torchvision.datasets.CIFAR10(
+        root=str(data_root),
+        train=(split == "train"),
+        download=True,
+        transform=transform,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        pin_memory=True,
+    )
+
+    model.eval()
+    feats = []
+    pbar = tqdm(dataloader, desc=f"Extracting DINOv2 features for CIFAR-10 {split}")
+    with torch.inference_mode():
+        for batch, _ in pbar:
+            batch = batch.to(run_device)
+            out = model(batch)
+            if isinstance(out, (tuple, list)):
+                out = out[0]
+            feats.append(out.detach().cpu())
+
+    features = torch.cat(feats, dim=0)
+    targets = torch.tensor(dataset.targets, dtype=torch.long)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "features": features,
+            "targets": targets,
+            "dataset": "cifar10",
+            "split": split,
+            "model": "dinov2_vits14",
+        },
+        output_path,
+    )
+    print(f"Saved CIFAR-10 DINOv2 features to {output_path}")
+
+
 def main():
     _require_torchvision()
 
@@ -116,12 +199,46 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--cifar10_dinov2",
+        action="store_true",
+        help="Run dedicated CIFAR-10 DINOv2 extraction and ignore --model ImageFolder flow.",
+    )
+    parser.add_argument(
+        "--cifar10_split",
+        type=str,
+        default="train",
+        choices=["train", "test"],
+        help="CIFAR-10 split when --cifar10_dinov2 is enabled.",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="",
+        help="Exact output file path. For CIFAR-10 use e.g. data/processed/cifar10_dinov2.pt",
+    )
 
     args = parser.parse_args()
 
     data_root = Path(args.data_root)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.cifar10_dinov2:
+        output_path = (
+            Path(args.output_file)
+            if args.output_file
+            else output_dir / f"cifar10_dinov2_{args.cifar10_split}.pt"
+        )
+        extract_cifar10_dinov2_features(
+            data_root=data_root,
+            output_path=output_path,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            device=args.device,
+            split=args.cifar10_split,
+        )
+        return
 
     device = _device_from_arg(args.device)
     model, image_size, mean, std = _load_model(args.model, device)

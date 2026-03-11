@@ -1,6 +1,7 @@
 """
 Credits: This code is adapted from the official repository of the paper "Categorical Flow Matching on Statistical Manifolds"
 by Chaoran Cheng, Jiahan Li, Jian Peng, and Ge Liu, NeurIPS 2024.
+Link : https://github.com/ccr-cheng/statistical-flow-matching
 """
 
 
