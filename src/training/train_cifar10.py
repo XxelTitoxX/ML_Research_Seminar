@@ -40,6 +40,7 @@ class TrainConfig:
     epochs: int = 300
     lr: float = 1e-4
     warmup_steps: int = 1000
+    grad_clip: float = 1.0
     ckpt_every: int = 5000
     eval_every: int = 1000
     eval_num_samples: int = 5000
@@ -447,17 +448,11 @@ def main() -> None:
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
-            # print gradient norms for debugging
-            total_norm = 0.0
-            for p in adapter.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
-            print(f"Step {step}: loss={loss.item():.4f}, grad_norm={total_norm:.4f}")
+            total_norm = torch.nn.utils.clip_grad_norm_(adapter.parameters(), config.grad_clip).item()
+            # print(f"Step {step}: loss={loss.item():.4f}, grad_norm={total_norm:.4f}")
             optim.step()
             sched.step()
-            pbar.set_postfix({"loss": loss.item(), "lr": sched.get_last_lr()[0]})
+            pbar.set_postfix({"loss": loss.item(), "lr": sched.get_last_lr()[0], "grad_norm": total_norm})
 
             step += 1
             if step % 20 == 0:
@@ -465,6 +460,7 @@ def main() -> None:
                     {
                         "train/loss": float(loss.item()),
                         "train/lr": float(sched.get_last_lr()[0]),
+                        "train/grad_norm": float(total_norm),
                         "train/epoch": epoch,
                         "train/step": step,
                     },
