@@ -300,14 +300,27 @@ def evaluate(
     embed_dim: int,
     device: torch.device,
 ) -> dict[str, float]:
-    samples = flow.sample(eval_num_samples).detach()  # [N, D, K]
-    indices = torch.argmax(samples, dim=-1).to(device=device, dtype=torch.long)
+    # Batchified sampling
+    batch_size = 256
+    remaining = eval_num_samples
+    gen_feat = torch.empty(eval_num_samples, train_dino_feat.shape[1], device=torch.device("cpu"))  # store on CPU to avoid OOM, move batches to device during processing
+    while remaining > 0:
+        curr_batch = min(batch_size, remaining)
+        samples = flow.sample(curr_batch).detach()  # [B, D, K]
+        indices = torch.argmax(samples, dim=-1).to(dtype=torch.long)
 
-    codes_flat = indices.reshape(-1)
-    quant_shape = (eval_num_samples, embed_dim, latent_h, latent_w)
-    recon = vq_model.decode_code(codes_flat, shape=quant_shape, channel_first=True).to(device)
+        # Decode all samples
+        codes_flat = indices.reshape(-1)
+        quant_shape = (curr_batch, embed_dim, latent_h, latent_w)
+        recon = vq_model.decode_code(codes_flat, shape=quant_shape, channel_first=True).to(device)
 
-    gen_feat = extract_dinov2_features(recon, dinov2_model, dino_mean, dino_std, batch_size=128)
+        # Extract DINOv2 features and compute metrics
+        gen_feat_b = extract_dinov2_features(recon, dinov2_model, dino_mean, dino_std, batch_size=128)
+        gen_feat[eval_num_samples - remaining : eval_num_samples - remaining + curr_batch] = gen_feat_b.to("cpu")
+        
+        
+        remaining -= curr_batch
+
     fid = compute_fid(train_dino_feat, gen_feat)
     precision, recall = precision_recall_knn_blockwise(train_dino_feat, gen_feat, k=5)
 
@@ -461,8 +474,6 @@ def main() -> None:
                         "train/loss": float(loss.item()),
                         "train/lr": float(sched.get_last_lr()[0]),
                         "train/grad_norm": float(total_norm),
-                        "train/epoch": epoch,
-                        "train/step": step,
                     },
                     step=step,
                 )
