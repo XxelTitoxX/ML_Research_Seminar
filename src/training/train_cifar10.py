@@ -37,11 +37,11 @@ class TrainConfig:
 
     batch_size: int = 128
     num_workers: int = 4
-    epochs: int = 30
+    epochs: int = 300
     lr: float = 1e-4
     warmup_steps: int = 1000
-    ckpt_every: int = 2000
-    eval_every: int = 2000
+    ckpt_every: int = 5000
+    eval_every: int = 1000
     eval_num_samples: int = 5000
     seed: int = 42
 
