@@ -158,7 +158,7 @@ class CatFlow(nn.Module):
         if self.p0 is not None and hasattr(self.p0, "log_prob"):
             logp_noise = self.p0.log_prob(phi)
         else:
-            logp_noise = self.prior_logp0(phi, eps=self.prior_eps).cpu()
+            logp_noise = self.prior_logp0(phi, eps=self.prior_eps)
         return logp_noise.reshape(-1) - f.reshape(-1)
     
     def __str__(self):
