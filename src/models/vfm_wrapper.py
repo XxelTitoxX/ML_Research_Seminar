@@ -84,6 +84,7 @@ class CatFlow(nn.Module):
                 )
         
         mean_div = torch.stack(div_estimates).mean(dim=0)
+        print(f"Mean div: {mean_div.mean().item():.4f}, t: {t[0].item():.4f}")
         return ((-v).detach(), mean_div)
 
     def conditional_flow(self, t, x, x1):
@@ -157,11 +158,14 @@ class CatFlow(nn.Module):
             return pack_state(dx, df)
         zT = solve_ode(vel_packed, z0, t, method='midpoint')
         phi, f = unpack_state(zT, D, K)
+        print(f"Mean f: {f.mean().item():.4f}")
         if self.p0 is not None and hasattr(self.p0, "log_prob"):
             logp_noise = self.p0.log_prob(phi)
         else:
             logp_noise = self.prior_logp0(phi, eps=self.prior_eps)
-        return logp_noise.reshape(-1) - f.reshape(-1)
+        logp = logp_noise - f
+        print(f"Mean logp: {logp.mean().item():.4f}")
+        return logp.reshape(-1)
     
     def __str__(self):
         """
