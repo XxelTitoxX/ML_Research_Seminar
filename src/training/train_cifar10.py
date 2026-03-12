@@ -24,6 +24,7 @@ from src.evaluation.fid import compute_fid
 from src.evaluation.precision_recall import compute_precision_recall, precision_recall_knn_blockwise
 from src.models.vfm_wrapper import CatFlow
 from src.models.vq_model import VQ_Cifar_L
+from src.models.transformer import CatFlowTransformer, CatFlowTransformerConfig
 
 
 @dataclass
@@ -146,6 +147,26 @@ def maybe_prepare_quantized_dataset(config: TrainConfig, device: torch.device, v
     print(f"[data] Saved quantized CIFAR-10 to: {q_path}")
     return payload
 
+@torch.no_grad()
+def get_vq_shapes(vq_model: nn.Module, image_size=(32, 32), in_channels=3, device="cpu"):
+    vq_model = vq_model.to(device).eval()
+    H, W = image_size
+
+    x = torch.zeros(1, in_channels, H, W, device=device)
+    h = vq_model.encoder(x)          # [1, z_channels, H_lat, W_lat]
+    h = vq_model.quant_conv(h)       # [1, Cvae, H_lat, W_lat]
+
+    _, Cvae, H_lat, W_lat = h.shape
+    D = H_lat * W_lat
+    K = vq_model.quantize.n_e
+
+    return {
+        "K": K,
+        "Cvae": Cvae,
+        "H_lat": H_lat,
+        "W_lat": W_lat,
+        "D": D,
+    }
 
 class CatFlowUNetAdapter(nn.Module):
     """Adapts UNet image IO to CatFlow categorical IO.
@@ -340,7 +361,6 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--ckpt_every", type=int, default=5000)
     parser.add_argument("--eval_every", type=int, default=1000)
     parser.add_argument("--eval_num_samples", type=int, default=5000)
-    parser.add_argument("--num_channels", type=int, default=128)
     parser.add_argument("--proj_channels", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
@@ -356,7 +376,6 @@ def parse_args() -> TrainConfig:
     cfg.ckpt_every = args.ckpt_every
     cfg.eval_every = args.eval_every
     cfg.eval_num_samples = args.eval_num_samples
-    cfg.num_channels = args.num_channels
     cfg.proj_channels = args.proj_channels
     cfg.num_workers = args.num_workers
     cfg.seed = args.seed
@@ -402,6 +421,7 @@ def main() -> None:
     )
 
     # 2) Load UNet and adapt to CatFlow IO.
+    """
     unet_cfg = {
         "dim": (config.proj_channels, 32, 32),
         "num_res_blocks": 2,
@@ -421,16 +441,45 @@ def main() -> None:
         latent_w=latent_w,
         proj_channels=config.proj_channels,
     ).to(device)
+    """
+
+    # 2) Load bidirectional transformer
+
+    # Example:
+    shapes = get_vq_shapes(vq_model, device=device)
+    K = shapes["K"]
+    Cvae = shapes["Cvae"]
+    H_lat = shapes["H_lat"]
+    W_lat = shapes["W_lat"]
+    D = H_lat * W_lat
+
+    codebook = vq_model.quantize.embedding.weight   # [K, Cvae]
+
+    model_cfg = CatFlowTransformerConfig(
+        num_classes=K,
+        seq_len=D,
+        codebook_dim=Cvae,
+        grid_h=H_lat,
+        grid_w=W_lat,
+        dim=512,
+        n_layer=8,
+        n_head=8,
+        input_dropout_p=0.1,
+        resid_dropout_p=0.1,
+        ffn_dropout_p=0.1,
+    )
+
+    model = CatFlowTransformer(model_cfg, codebook)
 
     flow = CatFlow(
-        model=adapter,
+        model=model,
         obs_dim=obs_dim,
         sigma_min=config.catflow_sigma_min,
     ).to(device)
 
     # 3) Optim + scheduler.
     # `adapter` already owns `net_model` as a submodule; avoid duplicated params in Adam.
-    optim = torch.optim.Adam(adapter.parameters(), lr=config.lr)
+    optim = torch.optim.Adam(model.parameters(), lr=config.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(
         optim,
         lr_lambda=lambda step: warmup_lr_lambda(step, config.warmup_steps),
@@ -443,7 +492,7 @@ def main() -> None:
     wandb.init(
         project=config.wandb_project,
         name=config.wandb_run_name,
-        config=asdict(config) | {"obs_dim": obs_dim, "unet_cfg": unet_cfg},
+        config=asdict(config) | {"obs_dim": obs_dim, "model_cfg": model_cfg, "train_cfg": asdict(config)},
     )
 
     step = 0
@@ -461,7 +510,7 @@ def main() -> None:
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
-            total_norm = torch.nn.utils.clip_grad_norm_(adapter.parameters(), config.grad_clip).item()
+            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip).item()
             # print(f"Step {step}: loss={loss.item():.4f}, grad_norm={total_norm:.4f}")
             optim.step()
             sched.step()
@@ -484,12 +533,11 @@ def main() -> None:
                     ckpt_path,
                     step,
                     epoch,
-                    net_model,
-                    adapter,
+                    model,
                     flow,
                     optim,
                     sched,
-                    model_config={"unet_cfg": unet_cfg, "obs_dim": obs_dim},
+                    model_config={"model_cfg": model_cfg, "obs_dim": obs_dim},
                 )
                 print(f"[ckpt] Saved {ckpt_path}")
 
@@ -523,12 +571,11 @@ def main() -> None:
         final_path,
         final_step,
         config.epochs - 1,
-        net_model,
-        adapter,
+        model,
         flow,
         optim,
         sched,
-        model_config={"unet_cfg": unet_cfg, "obs_dim": obs_dim},
+        model_config={"model_cfg": model_cfg, "obs_dim": obs_dim},
     )
     print(f"[done] Training complete. Final checkpoint: {final_path}")
     wandb.finish()
