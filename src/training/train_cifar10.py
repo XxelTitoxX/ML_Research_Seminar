@@ -277,6 +277,7 @@ def evaluate(
         batch_size = 256
         remaining = eval_num_samples
         gen_feat = torch.empty(eval_num_samples, train_dino_feat.shape[1], device=torch.device("cpu"))
+        print(f"[eval] Generating {eval_num_samples} samples...")
         while remaining > 0:
             curr_batch = min(batch_size, remaining)
             samples = flow.sample(curr_batch).detach()  # [B, D, K]
@@ -290,7 +291,8 @@ def evaluate(
             start = eval_num_samples - remaining
             gen_feat[start : start + curr_batch] = gen_feat_b.to("cpu")
             remaining -= curr_batch
-
+        
+        print("[eval] Computing FID...")
         fid = compute_fid(train_dino_feat, gen_feat)
         # precision, recall = precision_recall_knn_blockwise(train_dino_feat, gen_feat, k=5)
         metrics["eval/fid_dinov2"] = float(fid)
@@ -298,6 +300,7 @@ def evaluate(
         # metrics["eval/recall"] = float(recall)
 
         # 2) Fast validation proxy in token space (same objective as training).
+        print("[eval] Computing validation loss proxy...")
         val_losses: list[float] = []
         for batch_idx, (x1,) in enumerate(test_loader):
             if batch_idx >= eval_val_batches:
@@ -314,6 +317,7 @@ def evaluate(
     eps = 1e-4
     processed = 0
     nll_chunks: list[torch.Tensor] = []
+    print(f"[eval] Computing NLL estimate...")
     for (x1_idx,) in test_loader:
         if processed >= eval_nll_samples:
             break
@@ -460,6 +464,8 @@ def main() -> None:
     print("[train] Starting training loop...")
     for epoch in range(config.epochs):
         flow.train()
+        if config.tqdm_disable:
+            print(f"[train] Epoch {epoch+1}/{config.epochs}")
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs}", unit="batch", disable=config.tqdm_disable)
         for (x1,) in pbar:
             x1 = x1.to(device=device, dtype=torch.long)

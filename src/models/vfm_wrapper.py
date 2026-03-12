@@ -145,7 +145,7 @@ class CatFlow(nn.Module):
         B, D, K = x1.shape
         self.device = next(self.parameters()).device
         self.n_samples = n_samples
-        t = torch.linspace(0, 1, 100, device=self.device )
+        t = torch.linspace(0, 1, 20, device=self.device )
         z0 = pack_state(x1, torch.zeros((x1.shape[0], 1), device=x1.device, dtype=x1.dtype))
         def vel_packed(t, z):
             x, f = unpack_state(z, D, K)
