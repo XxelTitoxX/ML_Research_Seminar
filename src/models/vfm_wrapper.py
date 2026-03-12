@@ -24,7 +24,7 @@ class CatFlow(nn.Module):
         self.n_samples = n_samples
         self.prior_eps = prior_eps
         self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
-        self.eps_ = 1e-10
+        self.eps_ = 1e-6
         self.softmax = nn.Softmax(-1)
         # Optional external prior kept for backward compatibility.
         self.p0 = p0
@@ -70,14 +70,15 @@ class CatFlow(nn.Module):
         return (self.model(t, x, return_probs=True) - x)/(1-t.view(-1, *dims) + self.eps_)
     
     def reversed_velocity_with_div(self, t, state):
-        s = 1-t
+        # Reverse-time integration uses model-time s = 1 - t.
+        # Clamp away from s=1 where velocity has a 1/(1-s) singularity.
+        s = (1 - t).clamp(max=1.0 - self.eps_)
         x, logp = state
         x_ = x.detach().clone().requires_grad_(True)
         div_estimates = []
         with torch.set_grad_enabled(True):
             for i in range(self.n_samples):
                 v = self.velocity(s, x_)
-                is_last = (i == self.n_samples - 1)
                 div_estimates.append(
                     self.approx_div(v, x_, retain_graph=False)
                 )
@@ -147,7 +148,8 @@ class CatFlow(nn.Module):
         B, D, K = x1.shape
         self.device = next(self.parameters()).device
         self.n_samples = n_samples
-        t = torch.linspace(0, 1, 20, device=self.device )
+        # Start slightly above 0 to avoid evaluating reverse model-time at s=1.
+        t = torch.linspace(self.eps_, 1.0, 20, device=self.device)
         z0 = pack_state(x1, torch.zeros((x1.shape[0], 1), device=x1.device, dtype=x1.dtype))
         def vel_packed(t, z):
             x, f = unpack_state(z, D, K)
