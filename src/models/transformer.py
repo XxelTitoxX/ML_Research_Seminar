@@ -390,7 +390,7 @@ class CatFlowTransformer(nn.Module):
         """
         return x_t @ self.codebook
 
-    def forward(self, t: torch.Tensor, x_t: torch.Tensor) -> torch.Tensor:
+    def forward(self, t: torch.Tensor, x_t: torch.Tensor, return_probs: bool = False) -> torch.Tensor:
         """
         t:   [B] or [B, 1]
         x_t: [B, D, K]
@@ -424,4 +424,6 @@ class CatFlowTransformer(nn.Module):
 
         h = self.norm(h)
         logits = self.output(h).float()  # [B, D, K]
+        if return_probs:
+            logits = F.softmax(logits, dim=-1)
         return logits
