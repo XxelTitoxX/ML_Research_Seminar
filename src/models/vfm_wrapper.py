@@ -6,10 +6,12 @@ from .ode import solve_ode
 
 def pack_state(x, f):
     b = x.shape[0]
+    f = f.reshape(b, -1)
     return torch.cat([x.reshape(b, -1), f], dim=1)
 
 def unpack_state(z, d, k):
-    x_flat, f = z[:, :-1], z[:, -1:].contiguous()
+    x_dim = d * k
+    x_flat, f = z[:, :x_dim], z[:, x_dim:].contiguous()
     x = x_flat.view(z.shape[0], d, k)
     return x, f
 
@@ -157,7 +159,7 @@ class CatFlow(nn.Module):
             logp_noise = self.p0.log_prob(phi)
         else:
             logp_noise = self.prior_logp0(phi, eps=self.prior_eps).cpu()
-        return logp_noise - f
+        return logp_noise.reshape(-1) - f.reshape(-1)
     
     def __str__(self):
         """
