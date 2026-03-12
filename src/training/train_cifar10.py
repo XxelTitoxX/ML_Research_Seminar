@@ -317,11 +317,12 @@ def evaluate(
     eps = 1e-4
     processed = 0
     nll_chunks: list[torch.Tensor] = []
+    nll_batch_size = 32
     print(f"[eval] Computing NLL estimate...")
     for (x1_idx,) in test_loader:
         if processed >= eval_nll_samples:
             break
-        keep = min(eval_nll_samples - processed, x1_idx.shape[0])
+        keep = min(eval_nll_samples - processed, x1_idx.shape[0], nll_batch_size)
         x1_idx = x1_idx[:keep].to(device=device, dtype=torch.long)
         x1 = F.one_hot(x1_idx, num_classes=codebook_size).to(dtype=torch.float32)
         x1 = x1 * (1.0 - eps) + (eps / codebook_size)
