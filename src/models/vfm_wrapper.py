@@ -4,6 +4,15 @@ from torchdiffeq import odeint_adjoint as odeint
 from .ode import solve_ode
 
 
+def pack_state(x, f):
+    b = x.shape[0]
+    return torch.cat([x.reshape(b, -1), f], dim=1)
+
+def unpack_state(z, d, k):
+    x_flat, f = z[:, :-1], z[:, -1:].contiguous()
+    x = x_flat.view(z.shape[0], d, k)
+    return x, f
+
 class CatFlow(nn.Module):
     def __init__(self, model, p0=None, obs_dim=(2,), sigma_min=1e-10, n_samples=10, prior_eps=1e-4):
         super().__init__()
@@ -133,18 +142,17 @@ class CatFlow(nn.Module):
 
         
     def logp(self, x1, n_samples=50, rtol=1e-05, atol=1e-05):
+        B, D, K = x1.shape
         self.device = next(self.parameters()).device
         self.n_samples = n_samples
         t = torch.linspace(0, 1, 100, device=self.device )
-        phi, f = odeint(
-            self.reversed_velocity_with_div, 
-            (x1, torch.zeros((x1.shape[0], 1))), 
-            t, 
-            rtol=rtol,
-            atol=atol,
-            adjoint_params = self.model.parameters(),
-            )
-        phi, f = phi[-1].detach().cpu(), f[-1].detach().cpu().flatten()
+        z0 = pack_state(x1, torch.zeros((x1.shape[0], 1), device=x1.device, dtype=x1.dtype))
+        def vel_packed(t, z):
+            x, f = unpack_state(z, D, K)
+            dx, df = self.reversed_velocity_with_div(t, (x, f))
+            return pack_state(dx, df)
+        zT = solve_ode(vel_packed, z0, t, method='midpoint')
+        phi, f = unpack_state(zT, D, K)
         if self.p0 is not None and hasattr(self.p0, "log_prob"):
             logp_noise = self.p0.log_prob(phi)
         else:

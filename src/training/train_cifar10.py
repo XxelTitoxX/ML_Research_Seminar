@@ -31,7 +31,8 @@ from src.models.transformer import CatFlowTransformer, CatFlowTransformerConfig
 class TrainConfig:
     data_raw_dir: str = "data/raw"
     data_processed_dir: str = "data/processed"
-    quantized_dataset_name: str = "cifar10_q.pt"
+    q_train_dataset_name: str = "cifar10_q_train.pt"
+    q_test_dataset_name: str = "cifar10_q_test.pt"
     cifar10_dino_features: str = "data/processed/cifar10_dinov2.pt"
     checkpoints_dir: str = "checkpoints"
     vq_checkpoint_path: str = "checkpoints/vq_cifar_epoch_20.pt"
@@ -45,6 +46,9 @@ class TrainConfig:
     ckpt_every: int = 5000
     eval_every: int = 1000
     eval_num_samples: int = 5000
+    eval_val_batches: int = 8
+    eval_nll_samples: int = 256
+    eval_nll_hutchinson: int = 4
     seed: int = 42
 
     num_channels: int = 128
@@ -71,7 +75,7 @@ def pick_device() -> torch.device:
         return torch.device("cpu")
 
 
-def load_cifar10(batch_size: int, data_root: str, num_workers: int = 4) -> DataLoader:
+def load_cifar10(batch_size: int, data_root: str, train: bool = True, num_workers: int = 4) -> DataLoader:
     transform = transforms.Compose(
         [
             transforms.Resize(32),
@@ -79,12 +83,12 @@ def load_cifar10(batch_size: int, data_root: str, num_workers: int = 4) -> DataL
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ]
     )
-    dataset = datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform)
+    dataset = datasets.CIFAR10(root=data_root, train=train, download=True, transform=transform)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
-        drop_last=True,
+        shuffle=train,
+        drop_last=train,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )
@@ -97,17 +101,17 @@ def _extract_indices_from_vq_info(info: tuple[Any, Any, torch.Tensor], batch_siz
     return min_encoding_indices.view(batch_size, h * w)
 
 
-def maybe_prepare_quantized_dataset(config: TrainConfig, device: torch.device, vq_model: nn.Module) -> dict[str, Any]:
+def maybe_prepare_quantized_dataset(train:bool, config: TrainConfig, device: torch.device, vq_model: nn.Module) -> dict[str, Any]:
     processed_dir = ROOT / config.data_processed_dir
     processed_dir.mkdir(parents=True, exist_ok=True)
-    q_path = processed_dir / config.quantized_dataset_name
+    q_path = processed_dir / (config.q_train_dataset_name if train else config.q_test_dataset_name)
 
     if q_path.exists():
         print(f"[data] Using cached quantized dataset: {q_path}")
         return torch.load(q_path, map_location="cpu")
 
     print("[data] Quantized dataset not found. Loading CIFAR-10 and quantizing...")
-    loader = load_cifar10(config.batch_size, str(ROOT / config.data_raw_dir), num_workers=config.num_workers)
+    loader = load_cifar10(config.batch_size, str(ROOT / config.data_raw_dir), train=train, num_workers=config.num_workers)
 
     all_indices: list[torch.Tensor] = []
     latent_h: int | None = None
@@ -167,63 +171,6 @@ def get_vq_shapes(vq_model: nn.Module, image_size=(32, 32), in_channels=3, devic
         "W_lat": W_lat,
         "D": D,
     }
-
-class CatFlowUNetAdapter(nn.Module):
-    """Adapts UNet image IO to CatFlow categorical IO.
-
-    CatFlow expects:
-      x: [B, D, K]
-      logits: [B, D, K]
-
-    UNetModelWrapper operates on [B, C, H, W].
-    We map [D, K] <-> [K, H, W], then project K<->C where C is configurable.
-    """
-
-    def __init__(
-        self,
-        unet: nn.Module,
-        num_classes: int,
-        latent_h: int,
-        latent_w: int,
-        proj_channels: int,
-    ) -> None:
-        super().__init__()
-        self.unet = unet
-        self.num_classes = num_classes
-        self.latent_h = latent_h
-        self.latent_w = latent_w
-        self.flat_dim = latent_h * latent_w
-        self.proj_channels = proj_channels
-
-        self.in_proj = nn.Conv2d(num_classes, proj_channels, kernel_size=1)
-        self.out_proj = nn.Conv2d(proj_channels, num_classes, kernel_size=1)
-
-    def _forward_unet(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        # UNet wrappers vary in forward signature order; support both.
-        try:
-            return self.unet(t, x)
-        except TypeError:
-            return self.unet(x, t)
-
-    def forward(self, t: torch.Tensor, x: torch.Tensor, return_probs: bool = False) -> torch.Tensor:
-        b, d, k = x.shape
-        if d != self.flat_dim:
-            raise ValueError(f"Expected D={self.flat_dim}, got D={d}")
-        if k != self.num_classes:
-            raise ValueError(f"Expected K={self.num_classes}, got K={k}")
-
-        x_img = x.view(b, self.latent_h, self.latent_w, k).permute(0, 3, 1, 2).contiguous()
-        x_img = self.in_proj(x_img)
-        x_img = F.interpolate(x_img, size=(32, 32), mode="bilinear", align_corners=False)
-
-        out_img = self._forward_unet(t, x_img)
-        out_img = F.interpolate(out_img, size=(self.latent_h, self.latent_w), mode="bilinear", align_corners=False)
-        out_img = self.out_proj(out_img)
-
-        out = out_img.permute(0, 2, 3, 1).contiguous().view(b, d, k)
-        if return_probs:
-            return torch.softmax(out, dim=-1)
-        return out
 
 
 def build_dinov2_extractor(device: torch.device):
@@ -305,49 +252,87 @@ def save_checkpoint(
     )
 
 
-@torch.inference_mode()
 def evaluate(
     flow: CatFlow,
     vq_model: nn.Module,
     train_dino_feat: torch.Tensor,
+    test_loader: DataLoader,
     dinov2_model: nn.Module,
     dino_mean: torch.Tensor,
     dino_std: torch.Tensor,
     eval_num_samples: int,
+    eval_val_batches: int,
+    eval_nll_samples: int,
+    eval_nll_hutchinson: int,
+    codebook_size: int,
     latent_h: int,
     latent_w: int,
     embed_dim: int,
     device: torch.device,
 ) -> dict[str, float]:
-    # Batchified sampling
-    batch_size = 256
-    remaining = eval_num_samples
-    gen_feat = torch.empty(eval_num_samples, train_dino_feat.shape[1], device=torch.device("cpu"))  # store on CPU to avoid OOM, move batches to device during processing
-    while remaining > 0:
-        curr_batch = min(batch_size, remaining)
-        samples = flow.sample(curr_batch).detach()  # [B, D, K]
-        indices = torch.argmax(samples, dim=-1).to(dtype=torch.long)
+    metrics: dict[str, float] = {}
 
-        # Decode all samples
-        codes_flat = indices.reshape(-1)
-        quant_shape = (curr_batch, embed_dim, latent_h, latent_w)
-        recon = vq_model.decode_code(codes_flat, shape=quant_shape, channel_first=True).to(device)
+    # 1) Image-space quality metrics from generated samples.
+    with torch.inference_mode():
+        batch_size = 256
+        remaining = eval_num_samples
+        gen_feat = torch.empty(eval_num_samples, train_dino_feat.shape[1], device=torch.device("cpu"))
+        while remaining > 0:
+            curr_batch = min(batch_size, remaining)
+            samples = flow.sample(curr_batch).detach()  # [B, D, K]
+            indices = torch.argmax(samples, dim=-1).to(dtype=torch.long)
 
-        # Extract DINOv2 features and compute metrics
-        gen_feat_b = extract_dinov2_features(recon, dinov2_model, dino_mean, dino_std, batch_size=128)
-        gen_feat[eval_num_samples - remaining : eval_num_samples - remaining + curr_batch] = gen_feat_b.to("cpu")
-        
-        
-        remaining -= curr_batch
+            codes_flat = indices.reshape(-1)
+            quant_shape = (curr_batch, embed_dim, latent_h, latent_w)
+            recon = vq_model.decode_code(codes_flat, shape=quant_shape, channel_first=True).to(device)
 
-    fid = compute_fid(train_dino_feat, gen_feat)
-    precision, recall = precision_recall_knn_blockwise(train_dino_feat, gen_feat, k=5)
+            gen_feat_b = extract_dinov2_features(recon, dinov2_model, dino_mean, dino_std, batch_size=128)
+            start = eval_num_samples - remaining
+            gen_feat[start : start + curr_batch] = gen_feat_b.to("cpu")
+            remaining -= curr_batch
 
-    return {
-        "eval/fid_dinov2": float(fid),
-        "eval/precision": float(precision),
-        "eval/recall": float(recall),
-    }
+        fid = compute_fid(train_dino_feat, gen_feat)
+        # precision, recall = precision_recall_knn_blockwise(train_dino_feat, gen_feat, k=5)
+        metrics["eval/fid_dinov2"] = float(fid)
+        # metrics["eval/precision"] = float(precision)
+        # metrics["eval/recall"] = float(recall)
+
+        # 2) Fast validation proxy in token space (same objective as training).
+        val_losses: list[float] = []
+        for batch_idx, (x1,) in enumerate(test_loader):
+            if batch_idx >= eval_val_batches:
+                break
+            x1 = x1.to(device=device, dtype=torch.long)
+            bs = x1.shape[0]
+            x0 = flow.sample_prior(bs, *list(flow.obs_dim), device=device)
+            t = torch.rand(bs, device=device)
+            val_losses.append(float(flow.criterion(t, x0, x1).item()))
+        if val_losses:
+            metrics["eval/val_fm_ce"] = float(np.mean(val_losses))
+
+    # 3) Small-subset validation NLL estimate via reverse ODE (expensive; keep small).
+    eps = 1e-4
+    processed = 0
+    nll_chunks: list[torch.Tensor] = []
+    for (x1_idx,) in test_loader:
+        if processed >= eval_nll_samples:
+            break
+        keep = min(eval_nll_samples - processed, x1_idx.shape[0])
+        x1_idx = x1_idx[:keep].to(device=device, dtype=torch.long)
+        x1 = F.one_hot(x1_idx, num_classes=codebook_size).to(dtype=torch.float32)
+        x1 = x1 * (1.0 - eps) + (eps / codebook_size)
+
+        logp = flow.logp(x1, n_samples=eval_nll_hutchinson).to(device=device)
+        nll_chunks.append((-logp).detach())
+        processed += keep
+
+    if nll_chunks:
+        nll = torch.cat(nll_chunks, dim=0).mean().item()
+        bits_per_token = nll / (np.log(2.0) * flow.obs_dim[0])
+        metrics["eval/val_nll"] = float(nll)
+        metrics["eval/val_bits_per_token"] = float(bits_per_token)
+
+    return metrics
 
 
 def parse_args() -> TrainConfig:
@@ -358,7 +343,6 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--ckpt_every", type=int, default=5000)
     parser.add_argument("--eval_every", type=int, default=1000)
-    parser.add_argument("--eval_num_samples", type=int, default=5000)
     parser.add_argument("--proj_channels", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
@@ -373,7 +357,6 @@ def parse_args() -> TrainConfig:
     cfg.warmup_steps = args.warmup_steps
     cfg.ckpt_every = args.ckpt_every
     cfg.eval_every = args.eval_every
-    cfg.eval_num_samples = args.eval_num_samples
     cfg.proj_channels = args.proj_channels
     cfg.num_workers = args.num_workers
     cfg.seed = args.seed
@@ -401,7 +384,7 @@ def main() -> None:
     vq_model.load_state_dict(vq_ckpt["model_state_dict"])
     vq_model.eval()
 
-    q_data = maybe_prepare_quantized_dataset(config, device, vq_model)
+    q_data = maybe_prepare_quantized_dataset(train=True, config=config, device=device, vq_model=vq_model)
     indices = q_data["indices"].to(torch.long)
     latent_h = int(q_data["latent_h"])
     latent_w = int(q_data["latent_w"])
@@ -418,47 +401,27 @@ def main() -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    # 2) Load UNet and adapt to CatFlow IO.
-    """
-    unet_cfg = {
-        "dim": (config.proj_channels, 32, 32),
-        "num_res_blocks": 2,
-        "num_channels": config.num_channels,
-        "channel_mult": [1, 2, 2, 2],
-        "num_heads": 4,
-        "num_head_channels": 64,
-        "attention_resolutions": "16",
-        "dropout": 0.1,
-    }
-
-    net_model = UNetModelWrapper(**unet_cfg).to(device)
-    adapter = CatFlowUNetAdapter(
-        unet=net_model,
-        num_classes=codebook_size,
-        latent_h=latent_h,
-        latent_w=latent_w,
-        proj_channels=config.proj_channels,
-    ).to(device)
-    """
+    test_data = maybe_prepare_quantized_dataset(train=False, config=config, device=device, vq_model=vq_model)
+    test_indices = test_data["indices"].to(torch.long)
+    test_loader = DataLoader(
+        TensorDataset(test_indices),
+        batch_size=config.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     # 2) Load bidirectional transformer
-
-    # Example:
-    shapes = get_vq_shapes(vq_model, device=device)
-    K = shapes["K"]
-    Cvae = shapes["Cvae"]
-    H_lat = shapes["H_lat"]
-    W_lat = shapes["W_lat"]
-    D = H_lat * W_lat
 
     codebook = vq_model.quantize.embedding.weight   # [K, Cvae]
 
     model_cfg = CatFlowTransformerConfig(
-        num_classes=K,
-        seq_len=D,
-        codebook_dim=Cvae,
-        grid_h=H_lat,
-        grid_w=W_lat,
+        num_classes=codebook_size,
+        seq_len=obs_dim[0],
+        codebook_dim=codebook_embed_dim,
+        grid_h=latent_h,
+        grid_w=latent_w,
         dim=512,
         n_layer=8,
         n_head=8,
@@ -545,10 +508,15 @@ def main() -> None:
                     flow=flow,
                     vq_model=vq_model,
                     train_dino_feat=train_dino_feat,
+                    test_loader=test_loader,
                     dinov2_model=dinov2_model,
                     dino_mean=dino_mean,
                     dino_std=dino_std,
                     eval_num_samples=config.eval_num_samples,
+                    eval_val_batches=config.eval_val_batches,
+                    eval_nll_samples=config.eval_nll_samples,
+                    eval_nll_hutchinson=config.eval_nll_hutchinson,
+                    codebook_size=codebook_size,
                     latent_h=latent_h,
                     latent_w=latent_w,
                     embed_dim=codebook_embed_dim,
