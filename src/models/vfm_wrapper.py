@@ -77,7 +77,7 @@ class CatFlow(nn.Module):
                 v = self.velocity(s, x_)
                 is_last = (i == self.n_samples - 1)
                 div_estimates.append(
-                    self.approx_div(v, x_, retain_graph=not is_last)
+                    self.approx_div(v, x_, retain_graph=False)
                 )
         
         mean_div = torch.stack(div_estimates).mean(dim=0)
@@ -135,9 +135,9 @@ class CatFlow(nn.Module):
             return solve_ode(self.velocity, x0, t, method=method)
         
 
-    def approx_div(self, f_x, x, retain_graph=True):
+    def approx_div(self, f_x, x, retain_graph=False):
         z = torch.randint(low=0, high=2, size=x.shape).to(x) * 2 - 1
-        e_dzdx = torch.autograd.grad(f_x, x, z, create_graph=True, retain_graph=retain_graph)[0]
+        e_dzdx = torch.autograd.grad(f_x, x, z, create_graph=False, retain_graph=retain_graph)[0]
         return (e_dzdx*z).view(z.shape[0], -1).sum(dim=1)
 
         
