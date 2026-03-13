@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 from .ode import solve_ode
+import math
 
 
 def pack_state(x, f):
@@ -25,6 +26,7 @@ class CatFlow(nn.Module):
         self.prior_eps = prior_eps
         self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
         self.eps_ = 1e-6
+        self.clamp_t: float = 0.05 # from Categorical Flow Map repository
         self.softmax = nn.Softmax(-1)
         # Optional external prior kept for backward compatibility.
         self.p0 = p0
@@ -46,8 +48,9 @@ class CatFlow(nn.Module):
 
     @staticmethod
     def prior_logp0(p0, eps=1e-4):
-        # Uniform prior on simplex has constant log-density (ignored in differences).
-        return torch.zeros(p0.shape[0], device=p0.device, dtype=p0.dtype)
+        # Log-density of uniform prior on simplex.
+        B, D, K = p0.shape
+        return torch.full((B,), D * math.lgamma(K), device=p0.device, dtype=p0.dtype)
     
     def process_timesteps(self, t, x):
         if len(t.shape) == 0:
@@ -72,7 +75,7 @@ class CatFlow(nn.Module):
     def reversed_velocity_with_div(self, t, state):
         # Reverse-time integration uses model-time s = 1 - t.
         # Clamp away from s=1 where velocity has a 1/(1-s) singularity.
-        s = (1 - t).clamp(max=1.0 - self.eps_)
+        s = (1 - t).clamp(max=1.0 - self.clamp_t)
         x, logp = state
         x_ = x.detach().clone().requires_grad_(True)
         div_estimates = []
@@ -84,7 +87,7 @@ class CatFlow(nn.Module):
                 )
         
         mean_div = torch.stack(div_estimates).mean(dim=0)
-        print(f"Mean div: {mean_div.mean().item():.4f}, t: {t[0].item():.4f}")
+        print(f"Mean div: {mean_div.mean().item():.4f}, s: {s[0].item():.4f}")
         return ((-v).detach(), mean_div)
 
     def conditional_flow(self, t, x, x1):
@@ -133,7 +136,7 @@ class CatFlow(nn.Module):
             x0 = self.p0.sample([n_samples] + list(self.obs_dim)).to(self.device)
         else:
             x0 = self.sample_prior(n_samples, *list(self.obs_dim), device=self.device)
-        t = torch.linspace(0,1-self.eps_,10, device=self.device)
+        t = torch.linspace(0,1-self.clamp_t,10, device=self.device)
         with torch.no_grad():
             # return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
             return solve_ode(self.velocity, x0, t, method=method)
@@ -150,7 +153,7 @@ class CatFlow(nn.Module):
         self.device = next(self.parameters()).device
         self.n_samples = n_samples
         # Start slightly above 0 to avoid evaluating reverse model-time at s=1.
-        t = torch.linspace(self.eps_, 1.0, 20, device=self.device)
+        t = torch.linspace(self.clamp_t, 1.0, 20, device=self.device)
         z0 = pack_state(x1, torch.zeros((x1.shape[0], 1), device=x1.device, dtype=x1.dtype))
         def vel_packed(t, z):
             x, f = unpack_state(z, D, K)
