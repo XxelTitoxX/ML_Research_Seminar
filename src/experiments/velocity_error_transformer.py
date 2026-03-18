@@ -10,6 +10,9 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
+DATA_RAW = ROOT / "data" / "raw"
+DATA_PROCESSED = ROOT / "data" / "processed"
+CHECKPOINTS = ROOT / "checkpoints"
 sys.path.insert(0, str(ROOT))
 
 from src.models.vq_model import VQ_Cifar_L
@@ -36,12 +39,12 @@ def load_cifar10(data_root: str, train: bool = True) -> DataLoader:
     return dataset
 
 def load_q_cifar10() -> TensorDataset:
-    q_data = torch.load("data/processed/cifar10_q_train_l.pt", map_location="cpu")
+    q_data = torch.load(DATA_PROCESSED / "cifar10_q_train_l.pt", map_location="cpu")
     q_indices = q_data["indices"]  # shape: (N, seq_len)
     return TensorDataset(q_indices)
 
 def load_q_cifar10_with_labels() -> TensorDataset:
-    q_data = torch.load("data/processed/cifar10_q_train_l.pt", map_location="cpu")
+    q_data = torch.load(DATA_PROCESSED / "cifar10_q_train_l.pt", map_location="cpu")
     q_indices = q_data["indices"]  # shape: (N, seq_len)
     q_labels = q_data["labels"]  # shape: (N,)
     return TensorDataset(q_indices, q_labels)
@@ -86,14 +89,14 @@ def get_q_loader_with_labels(batch_size, codebook_size, shuffle: bool = True) ->
 
 
 def maybe_prepare_quantized_dataset(train:bool, device: torch.device, vq_model):
-    q_path = Path("data/processed/cifar10_q_{}_l.pt".format("train" if train else "test"))
+    q_path = DATA_PROCESSED / f"cifar10_q_{'train' if train else 'test'}_l.pt"
 
     if q_path.exists():
         print(f"[data] Using cached quantized dataset: {q_path}")
         return torch.load(q_path, map_location="cpu")
 
     print("[data] Quantized dataset not found. Loading CIFAR-10 and quantizing...")
-    dataset = load_cifar10("data/raw", train=train)
+    dataset = load_cifar10(DATA_RAW, train=train)
     loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4, drop_last=False)
 
     all_indices: list[torch.Tensor] = []
@@ -138,13 +141,13 @@ def main():
     device = pick_device()
 
     vq_model = VQ_Cifar_L().to(device)
-    vq_model.load_state_dict(torch.load("checkpoints/vq_cifar_epoch_20.pt", map_location=device)["model_state_dict"])
+    vq_model.load_state_dict(torch.load(CHECKPOINTS / "vq_cifar_epoch_20.pt", map_location=device)["model_state_dict"])
     vq_model.eval()
 
     maybe_prepare_quantized_dataset(train=True, device=device, vq_model=vq_model)
 
     flow, model_cfg, obs_dim = load_catflow_from_checkpoint(
-        flow_checkpoint_path=Path("checkpoints/step_25000.pt"),
+        flow_checkpoint_path=CHECKPOINTS / "step_25000.pt",
         vq_model=vq_model,
         device=device,
         sigma_min=1e-6,
@@ -205,7 +208,6 @@ def main():
     plt.ylabel("Average L2 Error")
     plt.grid()
     plt.savefig("velocity_error.png")
-    plt.show()
 
     plt.figure(figsize=(8, 5))
     plt.plot(ts.cpu(), error_t.cpu(), marker='o')
@@ -214,8 +216,7 @@ def main():
     plt.ylabel("Average L2 Error")
     plt.ylim(0, error_t[:len(ts)//2].max().item() * 1.1)  # zoom in on first half of time steps
     plt.grid()
-    plt.savefig("velocity_error.png")
-    plt.show()
+    plt.savefig("velocity_error_zoomed.png")
 
         
 
