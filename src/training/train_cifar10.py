@@ -39,6 +39,7 @@ class TrainConfig:
     vq_checkpoint_path: str = "checkpoints/vq_cifar_epoch_20.pt"
 
     batch_size: int = 128
+    n_training_samples: int | None = None
     num_workers: int = 4
     epochs: int = 300
     lr: float = 1e-4
@@ -358,6 +359,12 @@ def evaluate(
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train CatFlow UNet on VQ-quantized CIFAR-10.")
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument(
+        "--n_training_samples",
+        type=int,
+        default=None,
+        help="If set, train on only this many CIFAR-10 training samples.",
+    )
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--warmup_steps", type=int, default=1000)
@@ -371,6 +378,7 @@ def parse_args() -> TrainConfig:
 
     cfg = TrainConfig()
     cfg.batch_size = args.batch_size
+    cfg.n_training_samples = args.n_training_samples
     cfg.epochs = args.epochs
     cfg.lr = args.lr
     cfg.warmup_steps = args.warmup_steps
@@ -404,6 +412,19 @@ def main() -> None:
 
     q_data = maybe_prepare_quantized_dataset(train=True, config=config, device=device, vq_model=vq_model)
     indices = q_data["indices"].to(torch.long)
+    if config.n_training_samples is not None:
+        if config.n_training_samples <= 0:
+            raise ValueError("--n_training_samples must be a positive integer.")
+        total_train = indices.shape[0]
+        if config.n_training_samples > total_train:
+            raise ValueError(
+                f"--n_training_samples={config.n_training_samples} exceeds CIFAR-10 train size ({total_train})."
+            )
+        g = torch.Generator()
+        g.manual_seed(config.seed)
+        subset_idx = torch.randperm(total_train, generator=g)[: config.n_training_samples]
+        indices = indices[subset_idx]
+        print(f"[data] Using training subset: {indices.shape[0]}/{total_train} samples.")
     latent_h = int(q_data["latent_h"])
     latent_w = int(q_data["latent_w"])
     codebook_size = int(q_data["codebook_size"])
