@@ -49,9 +49,9 @@ class TrainConfig:
 
     grid_h: int = 1
     grid_w: int | None = None
-    model_dim: int = 768
-    n_layer: int = 12
-    n_head: int = 12
+    model_dim: int = 512
+    n_layer: int = 8
+    n_head: int = 8
     input_dropout_p: float = 0.0
     resid_dropout_p: float = 0.0
     ffn_dropout_p: float = 0.0
