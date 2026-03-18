@@ -17,7 +17,7 @@ def unpack_state(z, d, k):
     return x, f
 
 class CatFlow(nn.Module):
-    def __init__(self, model, obs_dim=(2,), loss="kld", sigma_min=1e-10, n_samples=10, prior_eps=1e-4):
+    def __init__(self, model, obs_dim=(2,), loss="kld", sigma_min=0.0, n_samples=10, prior_eps=1e-4):
         super().__init__()
         self.model = model
         self.sigma_min = sigma_min
@@ -73,7 +73,11 @@ class CatFlow(nn.Module):
     def velocity(self, t, x):
         t = self.process_timesteps(t, x)
         dims = [1]*(len(x.shape)-1)
-        return (self.model(t, x, return_probs=True) - x)/(1-t.view(-1, *dims) + self.eps_)
+        if self.loss == "mse":
+            velocity = self.model(t, x)
+        elif self.loss == "kld":
+            velocity = (self.model(t, x, return_probs=True) - x)/(1-t.view(-1, *dims) + self.eps_)
+        return velocity
     
     def reversed_velocity_with_div(self, t, state):
         # Reverse-time integration uses model-time s = 1 - t.
@@ -117,21 +121,12 @@ class CatFlow(nn.Module):
         values = - 1.0/denom
         x_scaled = x/denom
         return -x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype))
-    
-    # def target_velocity(self, t, x, x1):
-    #     return self.conditional_velocity(t, self.conditional_flow(t, x, x1), x1)
-    
-    # def criterion(self, t, x0, x1):
-    #    v = self.forward(t, x0, x1)
-    #    target = self.target_velocity(t, x0, x1)
-    #    dim = tuple(torch.arange(1, len(x0.shape)))
-    #    return torch.mean((v - target).pow(2).sum(dim=dim))
 
     def criterion(self, t, x0, x1):
         output = self.forward(t, x0, x1) # shape: (batch_size, seq_len, codebook_size)
 
         if self.loss == "mse":
-            target = self.conditional_velocity(t, x0, x1)
+            target = torch.nn.functional.one_hot(x1, num_classes=x0.shape[-1]).to(x0.dtype) - x0
             dim = tuple(torch.arange(1, len(x0.shape)))
             return torch.mean((output - target).pow(2).sum(dim=dim))
         elif self.loss == "kld":
@@ -170,10 +165,7 @@ class CatFlow(nn.Module):
         zT = solve_ode(vel_packed, z0, t, method='midpoint')
         phi, f = unpack_state(zT, D, K)
         print(f"Mean f: {f.mean().item():.4f}")
-        if self.p0 is not None and hasattr(self.p0, "log_prob"):
-            logp_noise = self.p0.log_prob(phi)
-        else:
-            logp_noise = self.prior_logp0(phi, eps=self.prior_eps)
+        logp_noise = self.prior_logp0(phi, eps=self.prior_eps)
         logp = logp_noise - f
         print(f"Mean logp: {logp.mean().item():.4f}")
         return logp.reshape(-1)
