@@ -70,8 +70,8 @@ class TrainConfig:
     uniprot_raw_path: str = "data/raw/uniprot_sprot.fasta.gz"
     uniprot_seq_len: int = 128
     uniprot_test_fraction: float = 0.1
-    uniprot_min_seq_len: int = 64
-    uniprot_max_sequences: int = 0
+    uniprot_min_seq_len: int = 80
+    uniprot_max_sequences: int = 50000
     uniprot_force_reprocess: bool = False
 
 
