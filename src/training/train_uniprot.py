@@ -55,8 +55,6 @@ class TrainConfig:
     input_dropout_p: float = 0.1
     resid_dropout_p: float = 0.1
     ffn_dropout_p: float = 0.1
-    codebook_init: str = "identity"
-    codebook_dim: int | None = None
 
     checkpoints_dir: str = "checkpoints/uniprot_catflow"
     wandb_project: str = "closedform-catflow-uniprot"
@@ -292,24 +290,6 @@ def infer_num_classes(train_x: torch.Tensor, test_x: torch.Tensor | None, overri
     return override
 
 
-def build_codebook(config: TrainConfig, num_classes: int) -> torch.Tensor:
-    mode = config.codebook_init.lower().strip()
-    if mode == "identity":
-        if config.codebook_dim is not None and config.codebook_dim != num_classes:
-            raise ValueError("Identity codebook requires --codebook_dim to equal --num_classes (or be omitted).")
-        return torch.eye(num_classes, dtype=torch.float32)
-
-    if mode == "random":
-        codebook_dim = config.codebook_dim or min(256, num_classes)
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(config.seed)
-        codebook = torch.randn(num_classes, codebook_dim, generator=generator, dtype=torch.float32)
-        codebook = codebook / math.sqrt(float(codebook_dim))
-        return codebook
-
-    raise ValueError(f"Unsupported --codebook_init '{config.codebook_init}'. Use 'identity' or 'random'.")
-
-
 def warmup_lr_lambda(step: int, warmup_steps: int) -> float:
     if warmup_steps <= 0:
         return 1.0
@@ -385,8 +365,6 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--input_dropout_p", type=float, default=0.1)
     parser.add_argument("--resid_dropout_p", type=float, default=0.1)
     parser.add_argument("--ffn_dropout_p", type=float, default=0.1)
-    parser.add_argument("--codebook_init", type=str, choices=("identity", "random"), default="identity")
-    parser.add_argument("--codebook_dim", type=int, default=None)
     parser.add_argument("--checkpoints_dir", type=str, default="checkpoints/uniprot_catflow")
     parser.add_argument("--wandb_project", type=str, default="closedform-catflow-uniprot")
     parser.add_argument("--wandb_run_name", type=str, default=None)
@@ -431,8 +409,6 @@ def parse_args() -> TrainConfig:
     cfg.input_dropout_p = args.input_dropout_p
     cfg.resid_dropout_p = args.resid_dropout_p
     cfg.ffn_dropout_p = args.ffn_dropout_p
-    cfg.codebook_init = args.codebook_init
-    cfg.codebook_dim = args.codebook_dim
     cfg.checkpoints_dir = args.checkpoints_dir
     cfg.wandb_project = args.wandb_project
     cfg.wandb_run_name = args.wandb_run_name
@@ -487,7 +463,7 @@ def main() -> None:
 
     num_classes = infer_num_classes(train_indices, test_indices, override=config.num_classes)
     obs_dim = (seq_len, num_classes)
-    codebook = build_codebook(config, num_classes)
+    codebook = None
 
     train_loader = DataLoader(
         TensorDataset(train_indices),
@@ -509,7 +485,7 @@ def main() -> None:
     model_cfg = CatFlowTransformerConfig(
         num_classes=num_classes,
         seq_len=seq_len,
-        codebook_dim=int(codebook.shape[1]),
+        codebook_dim=None,
         grid_h=config.grid_h,
         grid_w=grid_w,
         dim=config.model_dim,

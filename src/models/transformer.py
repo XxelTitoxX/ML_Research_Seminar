@@ -311,27 +311,29 @@ class CatFlowTransformer(nn.Module):
         x_t @ codebook -> [B, D, C_vae]
         then projected to model dim and processed by transformer blocks.
     """
-    def __init__(self, config: CatFlowTransformerConfig, codebook: torch.Tensor):
+    def __init__(self, config: CatFlowTransformerConfig, codebook: Optional[torch.Tensor] = None):
         super().__init__()
         self.config = config
 
         assert config.grid_h * config.grid_w == config.seq_len, \
             f"Expected grid_h * grid_w == seq_len, got {config.grid_h} * {config.grid_w} != {config.seq_len}"
-
-        if not isinstance(codebook, torch.Tensor):
-            raise TypeError("codebook must be a torch.Tensor")
-        if codebook.shape != (config.num_classes, config.codebook_dim):
+    
+        if codebook is not None and codebook.shape != (config.num_classes, config.codebook_dim):
             raise ValueError(
                 f"Expected codebook shape {(config.num_classes, config.codebook_dim)}, got {tuple(codebook.shape)}"
             )
 
         # Store codebook as a buffer by default: the VQ-VAE codebook is usually fixed.
         # If you want to finetune it jointly, change this to nn.Parameter.
-        self.register_buffer("codebook", codebook.clone())
+        if codebook is not None:
+            self.register_buffer("codebook", codebook.clone())
 
-        self.input_norm = RMSNorm(config.codebook_dim, eps=config.norm_eps)
-        self.input_proj = nn.Linear(config.codebook_dim, config.dim, bias=False)
-        self.input_dropout = nn.Dropout(config.input_dropout_p)
+            self.input_norm = RMSNorm(config.codebook_dim, eps=config.norm_eps)
+            self.input_proj = nn.Linear(config.codebook_dim, config.dim, bias=False)
+            self.input_dropout = nn.Dropout(config.input_dropout_p)
+        else:
+            self.codebook = None
+            self.input_proj = nn.Linear(config.num_classes, config.dim, bias=False)
 
         self.time_emb = SinusoidalPosEmb(config.dim)
         time_hidden = config.time_mlp_hidden_dim or (4 * config.dim)
@@ -405,13 +407,17 @@ class CatFlowTransformer(nn.Module):
         if K != self.config.num_classes:
             raise ValueError(f"Expected K={self.config.num_classes}, got K={K}")
 
-        # [B, D, K] -> [B, D, C_vae]
-        z = self.embed_with_codebook(x_t)
+        if self.codebook is None:
+            x_t = x_t - (1.0 / self.config.num_classes)
+            h = self.input_proj(x_t)
+        else:
+            # [B, D, K] -> [B, D, C_vae]
+            z = self.embed_with_codebook(x_t)
 
-        # [B, D, C_vae] -> [B, D, dim]
-        h = self.input_norm(z)
-        h = self.input_proj(h)
-        h = self.input_dropout(h)
+            # [B, D, C_vae] -> [B, D, dim]
+            h = self.input_norm(z)
+            h = self.input_proj(h)
+            h = self.input_dropout(h)
 
         # time conditioning -> [B, 4 * dim]
         t_emb = self.time_emb(t)

@@ -429,7 +429,7 @@ def main() -> None:
 
     # 2) Load bidirectional transformer
 
-    codebook = vq_model.quantize.embedding.weight   # [K, Cvae]
+    codebook = None
 
     model_cfg = CatFlowTransformerConfig(
         num_classes=codebook_size,
@@ -437,15 +437,15 @@ def main() -> None:
         codebook_dim=codebook_embed_dim,
         grid_h=latent_h,
         grid_w=latent_w,
-        dim=768,
-        n_layer=12,
-        n_head=12,
-        input_dropout_p=0.1,
-        resid_dropout_p=0.1,
-        ffn_dropout_p=0.1,
+        dim=512,
+        n_layer=8,
+        n_head=8,
+        input_dropout_p=0.0,
+        resid_dropout_p=0.0,
+        ffn_dropout_p=0.0,
     )
 
-    model = CatFlowTransformer(model_cfg, codebook)
+    model = CatFlowTransformer(model_cfg, codebook=codebook)
 
     flow = CatFlow(
         model=model,

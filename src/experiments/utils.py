@@ -106,6 +106,44 @@ def load_catflow_from_checkpoint(
 
     return flow, transformer_cfg, obs_dim
 
+def load_catflow_checkpoint(
+    flow_checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[CatFlow, CatFlowTransformerConfig, tuple[int, int]]:
+    ckpt = load_checkpoint(flow_checkpoint_path, device=device)
+    if "model_config" not in ckpt or "model_state_dict" not in ckpt:
+        raise KeyError(
+            f"Missing `model_config` or `model_state_dict` in CatFlow checkpoint: {flow_checkpoint_path}"
+        )
+
+    model_config = ckpt["model_config"]
+    raw_cfg = model_config.get("model_cfg")
+    if raw_cfg is None:
+        raise KeyError("Missing `model_cfg` in checkpoint['model_config'].")
+
+    transformer_cfg = _to_transformer_config(raw_cfg)
+    obs_dim = tuple(model_config.get("obs_dim", (transformer_cfg.seq_len, transformer_cfg.num_classes)))
+    if len(obs_dim) != 2:
+        raise ValueError(f"`obs_dim` must have 2 entries (D, K), got {obs_dim}")
+
+    codebook = None
+
+    model = CatFlowTransformer(transformer_cfg, codebook).to(device)
+    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    model.eval()
+
+    flow = CatFlow(
+        model=model,
+        obs_dim=obs_dim,
+    ).to(device)
+    if "flow_state_dict" in ckpt:
+        # Includes the same model weights with `model.` prefix, plus wrapper-owned state if any.
+        flow.load_state_dict(ckpt["flow_state_dict"], strict=False)
+    flow.clamp_t = 0.005
+    flow.eval()
+
+    return flow, transformer_cfg, obs_dim
+
 def load_codebook_catflow_from_checkpoint(
     flow_checkpoint_path: Path,
     vq_model: nn.Module,
