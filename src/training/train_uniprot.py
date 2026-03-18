@@ -33,7 +33,7 @@ class TrainConfig:
     test_key: str | None = None
     num_classes: int | None = None
 
-    batch_size: int = 256
+    batch_size: int = 128
     num_workers: int = 4
     epochs: int = 300
     lr: float = 2e-4
@@ -208,11 +208,8 @@ def process_uniprot(config: TrainConfig, requested_split: str) -> Path:
     torch.save(train_tensor, canonical_train)
     torch.save(test_tensor, canonical_test)
     # Compatibility with requested naming in user instructions.
-    torch.save(train_tensor, legacy_train)
-    torch.save(test_tensor, legacy_test)
     print(f"[data] Saved processed UniProt train split to: {canonical_train}")
     print(f"[data] Saved processed UniProt test split to: {canonical_test}")
-    print(f"[data] Saved compatibility splits to: {legacy_train} and {legacy_test}")
 
     return canonical_train if requested_split == "train" else canonical_test
 
@@ -405,8 +402,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--uniprot_raw_path", type=str, default="data/raw/uniprot_sprot.fasta.gz")
     parser.add_argument("--uniprot_seq_len", type=int, default=128)
     parser.add_argument("--uniprot_test_fraction", type=float, default=0.1)
-    parser.add_argument("--uniprot_min_seq_len", type=int, default=64)
-    parser.add_argument("--uniprot_max_sequences", type=int, default=0)
+    parser.add_argument("--uniprot_min_seq_len", type=int, default=80)
+    parser.add_argument("--uniprot_max_sequences", type=int, default=50000)
     parser.add_argument("--uniprot_force_reprocess", action="store_true")
     parser.add_argument("--tqdm_enable", action="store_true", help="Enable tqdm progress bars")
     args = parser.parse_args()
