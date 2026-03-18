@@ -33,6 +33,7 @@ class TrainConfig:
     test_key: str | None = None
     num_classes: int | None = None
 
+    loss: str = "kld"  # choices: "kld", "mse"
     batch_size: int = 128
     num_workers: int = 4
     epochs: int = 300
@@ -399,6 +400,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--train_key", type=str, default=None)
     parser.add_argument("--test_key", type=str, default=None)
     parser.add_argument("--num_classes", type=int, default=None)
+    parser.add_argument("--loss", type=str, default="kld", choices=["kld", "mse"], help="Loss to optimize: CE or MSE.")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -444,6 +446,7 @@ def parse_args() -> TrainConfig:
     cfg.train_key = args.train_key
     cfg.test_key = args.test_key
     cfg.num_classes = args.num_classes
+    cfg.loss = args.loss
     cfg.batch_size = args.batch_size
     cfg.epochs = args.epochs
     cfg.lr = args.lr
@@ -552,6 +555,7 @@ def main() -> None:
     model = CatFlowTransformer(model_cfg, codebook=codebook)
     flow = CatFlow(
         model=model,
+        loss=config.loss,
         obs_dim=obs_dim,
         sigma_min=config.catflow_sigma_min,
     ).to(device)
