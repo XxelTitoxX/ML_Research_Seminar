@@ -294,12 +294,15 @@ def evaluate(
             remaining -= curr_batch
             if first_batch:
                 # Save some reconstructions for visualization
+                output_dir = ROOT / "outputs"
+                if not output_dir.exists():
+                    output_dir.mkdir(parents=True)
                 n_viz = min(6, curr_batch)
                 recon_viz = recon[:n_viz].cpu()
                 recon_viz = (recon_viz + 1.0) * 0.5
                 recon_viz = recon_viz.clamp(0.0, 1.0)
                 grid = make_grid(recon_viz, nrow=n_viz)
-                save_image(grid, f"/outputs/sample_recon_step{step}.png")
+                save_image(grid, output_dir / f"sample_recon_step{step}.png")
                 first_batch = False
         
         print("[eval] Computing FID...")
