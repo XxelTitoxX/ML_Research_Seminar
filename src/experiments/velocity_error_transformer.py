@@ -94,6 +94,9 @@ def maybe_prepare_quantized_dataset(train:bool, device: torch.device, vq_model):
     if q_path.exists():
         print(f"[data] Using cached quantized dataset: {q_path}")
         return torch.load(q_path, map_location="cpu")
+    else:
+        # make sure the processed data directory exists
+        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
 
     print("[data] Quantized dataset not found. Loading CIFAR-10 and quantizing...")
     dataset = load_cifar10(DATA_RAW, train=train)
