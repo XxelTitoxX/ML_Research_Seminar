@@ -281,7 +281,7 @@ def evaluate(
         first_batch = True
         while remaining > 0:
             curr_batch = min(batch_size, remaining)
-            samples = flow.sample(curr_batch).detach()  # [B, D, K]
+            samples = flow.sample(curr_batch, method='euler', n_steps=100).detach()  # [B, D, K]
             indices = torch.argmax(samples, dim=-1).to(dtype=torch.long)
 
             codes_flat = indices.reshape(-1)

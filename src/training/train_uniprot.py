@@ -52,9 +52,9 @@ class TrainConfig:
     model_dim: int = 768
     n_layer: int = 12
     n_head: int = 12
-    input_dropout_p: float = 0.1
-    resid_dropout_p: float = 0.1
-    ffn_dropout_p: float = 0.1
+    input_dropout_p: float = 0.0
+    resid_dropout_p: float = 0.0
+    ffn_dropout_p: float = 0.0
 
     checkpoints_dir: str = "checkpoints/uniprot_catflow"
     wandb_project: str = "closedform-catflow-uniprot"
@@ -352,7 +352,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--ckpt_every", type=int, default=2000)
+    parser.add_argument("--ckpt_every", type=int, default=3000)
     parser.add_argument("--eval_every", type=int, default=500)
     parser.add_argument("--eval_val_batches", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -362,9 +362,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--model_dim", type=int, default=512)
     parser.add_argument("--n_layer", type=int, default=8)
     parser.add_argument("--n_head", type=int, default=8)
-    parser.add_argument("--input_dropout_p", type=float, default=0.1)
-    parser.add_argument("--resid_dropout_p", type=float, default=0.1)
-    parser.add_argument("--ffn_dropout_p", type=float, default=0.1)
+    parser.add_argument("--input_dropout_p", type=float, default=0.0)
+    parser.add_argument("--resid_dropout_p", type=float, default=0.0)
+    parser.add_argument("--ffn_dropout_p", type=float, default=0.0)
     parser.add_argument("--checkpoints_dir", type=str, default="checkpoints/uniprot_catflow")
     parser.add_argument("--wandb_project", type=str, default="closedform-catflow-uniprot")
     parser.add_argument("--wandb_run_name", type=str, default=None)
