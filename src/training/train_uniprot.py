@@ -42,6 +42,7 @@ class TrainConfig:
     ckpt_every: int = 2000
     eval_every: int = 500
     eval_val_batches: int = 16
+    eval_n_gen_samples: int = 1000
     seed: int = 42
 
     catflow_sigma_min: float = 1e-6
@@ -341,6 +342,56 @@ def evaluate_validation_ce(
     return {"eval/val_fm_ce": float(sum(losses) / len(losses))} if losses else {}
 
 
+def build_sequence_lookup(sequences: torch.Tensor) -> set[bytes]:
+    seq_cpu = sequences.to(dtype=torch.int16, device=torch.device("cpu")).contiguous()
+    return {row.numpy().tobytes() for row in seq_cpu}
+
+
+def accuracy(generated_indices: torch.Tensor, train_sequence_lookup: set[bytes]) -> tuple[int, float]:
+    if generated_indices.dim() != 2:
+        raise ValueError(f"Expected generated indices shape [N, D], got {tuple(generated_indices.shape)}")
+    if generated_indices.shape[0] == 0:
+        return 0, 0.0
+
+    generated_cpu = generated_indices.to(dtype=torch.int16, device=torch.device("cpu")).contiguous()
+    match_count = 0
+    for row in generated_cpu:
+        if row.numpy().tobytes() in train_sequence_lookup:
+            match_count += 1
+
+    return match_count, match_count / generated_cpu.shape[0]
+
+
+@torch.no_grad()
+def evaluate_generation_accuracy(
+    flow: CatFlow,
+    train_sequence_lookup: set[bytes],
+    num_samples: int,
+    sample_batch_size: int,
+    method: str = "euler",
+    n_steps: int = 10,
+) -> dict[str, float]:
+    if num_samples <= 0:
+        return {}
+    if sample_batch_size <= 0:
+        raise ValueError(f"sample_batch_size must be > 0, got {sample_batch_size}")
+
+    total_matches = 0
+    generated = 0
+    while generated < num_samples:
+        curr_batch = min(sample_batch_size, num_samples - generated)
+        samples = flow.sample(n_samples=curr_batch, method=method, n_steps=n_steps).detach()
+        generated_indices = torch.argmax(samples, dim=-1).to(dtype=torch.long)
+        match_count, _ = accuracy(generated_indices, train_sequence_lookup)
+        total_matches += match_count
+        generated += curr_batch
+
+    acc = total_matches / num_samples
+    return {
+        "eval/train_exact_match_acc": float(acc),
+    }
+
+
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train CatFlow transformer on categorical UniProt data.")
     parser.add_argument("--data_train_path", type=str, default="data/processed/uniprot_train.pt")
@@ -355,6 +406,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--ckpt_every", type=int, default=3000)
     parser.add_argument("--eval_every", type=int, default=500)
     parser.add_argument("--eval_val_batches", type=int, default=16)
+    parser.add_argument("--eval_n_gen_samples", type=int, default=1000)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--grid_h", type=int, default=1)
@@ -399,6 +451,7 @@ def parse_args() -> TrainConfig:
     cfg.ckpt_every = args.ckpt_every
     cfg.eval_every = args.eval_every
     cfg.eval_val_batches = args.eval_val_batches
+    cfg.eval_n_gen_samples = args.eval_n_gen_samples
     cfg.num_workers = args.num_workers
     cfg.seed = args.seed
     cfg.grid_h = args.grid_h
@@ -473,6 +526,7 @@ def main() -> None:
         num_workers=config.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
+    train_sequence_lookup = build_sequence_lookup(train_indices)
     test_loader = DataLoader(
         TensorDataset(test_indices),
         batch_size=config.batch_size,
@@ -593,6 +647,14 @@ def main() -> None:
                     obs_dim=obs_dim,
                     device=device,
                     max_batches=config.eval_val_batches,
+                )
+                metrics.update(
+                    evaluate_generation_accuracy(
+                        flow=flow,
+                        train_sequence_lookup=train_sequence_lookup,
+                        num_samples=config.eval_n_gen_samples,
+                        sample_batch_size=config.batch_size,
+                    )
                 )
                 if metrics:
                     if not config.disable_wandb:
