@@ -1,0 +1,169 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Closed form solution for the CatFlow optimization problem}
+\author{Edgar Duc}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{One-dimensional case}
+We denote as $\Delta^{K-1}$ the $(K-1)$-dimensional simplex, i.e. the set of $K$-dimensional vectors with non-negative entries that sum to 1. \\
+We denote as $e_k$ the $k$-th standard basis vector in $\mathbb{R}^K$. \\
+Let $\mathcal{D}_n = \{ x_i : 1 \leq i \leq n \} \subset \{e_1, \ldots, e_K\}$  denote the dataset.  \\
+Let $\hat{p}_{data} = \frac{1}{n} \sum_{i=1}^n \delta_{x_i}$ denote the empirical distribution of the dataset. \\
+Let $p_0 \in \mathcal{P}(\mathbb{R}^K)$ denote the distribution of the initial state $x_0$. \\
+
+Let $X_1 \sim \hat{p}_{data}$, $X_0 \sim p_0$, $t \sim \mathcal{U}([0, 1])$.
+Let $X_t = (1-t)X_0 + tX_1$.\\
+We denote as $p_t$ the distribution of the state $x_t$ at time $t$. \\
+Let $q : \mathbb{R}^K \times [0, 1] \to \Delta^{K-1}$ denote a velocity field. \\
+
+The CatFlow loss is a cross-entropy loss, defined as:
+\begin{equation}
+    \mathcal{L}(q) = - \mathbb{E} \left[ \sum_{k=1}^{K} X_1^{(k)} \log q^{(k)}(X_t, t) \right]
+\end{equation}
+The optimization problem is to find the velocity field $q$ that minimizes the loss:
+\begin{equation}
+    \min_{q} \mathcal{L}(q)
+\end{equation}
+
+By conditioning on $X_t$ and $t$, we can rewrite the loss as:
+\begin{equation}
+    \mathcal{L}(q) = - \mathbb{E} \left[ \sum_{k=1}^{K} \mathbb{E}[X_1^{(k)} | X_t, t] \log q^{(k)}(X_t, t) \right]
+\end{equation}
+
+We know that $q_*$ minimizes the loss if and only if for all $x \in \mathbb{R}^K$ and $s \in [0, 1]$, we have:
+\begin{equation}
+    q_*(x, s) = \mathbb{E}[X_1 | X_t = x, t = s]
+\end{equation}
+
+We also know that :
+\begin{equation}
+    p_t(x | X_1 = x_i) = \frac{1}{(1-t)^{K}} p_0 \left( \frac{x - t x_i}{1-t} \right)
+\end{equation}
+Thus, by Bayes' rule, we have:
+\begin{equation}
+    \lambda_i(x, s) = \mathbb{P}[X_1 = x_i | X_t = x, t = s] = \frac{p_0 \left( \frac{x - s x_i}{1-s} \right) \hat{p}_{data}(x_i)}{\sum_{j=1}^n p_0 \left( \frac{x - s x_j}{1-s} \right) \hat{p}_{data}(x_j)} = \frac{p_0 \left( \frac{x - s x_i}{1-s} \right)}{\sum_{j=1}^n p_0 \left( \frac{x - s x_j}{1-s} \right)}
+\end{equation}
+Hence, we have:
+\begin{equation}
+\boxed{
+    q_*(x,s)
+    =
+    \sum_{i=1}^{n} \lambda_i(x,s)\, x_i
+}
+\end{equation}
+
+\section{Multi-dimensional case}
+Let $D$ be the sequence length, and $K$ be the number of classes. \\
+Let $\mathcal{D}_n = \{ x_i : 1 \leq i \leq n \} \subset \{e_1, \ldots, e_K\}^D$  denote the dataset.  \\
+Let $\hat{p}_{data} = \frac{1}{n} \sum_{i=1}^n \delta_{x_i}$ denote the empirical distribution of the dataset. \\
+Let $p_0 \in \mathcal{P}((\mathbb{R}^K)^D)$ denote the distribution of the initial state $x_0$. \\
+Let $X_1 \sim \hat{p}_{data}$, $X_0 \sim p_0$, $t \sim \mathcal{U}([0, 1])$.
+Let $X_t = (1-t)X_0 + tX_1$.\\
+We denote as $p_t$ the distribution of the state $x_t$ at time $t$. \\
+Let $q : ((\mathbb{R}^K)^D) \times [0, 1] \to (\Delta^{K-1})^D$ denote a velocity field. \\
+
+The CatFlow loss is a cross-entropy loss \textbf{independently applied to each position in the sequence}, defined as:
+\begin{equation}
+    \mathcal{L}(q) = - \mathbb{E} \left[ \sum_{d=1}^{D} \sum_{k=1}^{K} X_1^{(d, k)} \log q^{(d, k)}(X_t, t) \right]
+\end{equation}
+The optimization problem is to find the velocity field $q$ that minimizes the loss:
+\begin{equation}
+    \min_{q} \mathcal{L}(q)
+\end{equation}
+
+As in the one-dimensional case, by conditioning on $X_t$ and $t$, we can rewrite the loss as:
+\begin{equation}
+    \mathcal{L}(q)
+    =
+    -\mathbb{E}\left[
+        \sum_{d=1}^{D} \sum_{k=1}^{K}
+        \mathbb{E}\left[X_1^{(d,k)} \mid X_t, t\right]
+        \log q^{(d,k)}(X_t,t)
+    \right]
+\end{equation}
+
+Since the loss is a sum of cross-entropies over positions, the minimizer is obtained pointwise by matching each categorical distribution to the corresponding conditional expectation. Therefore, for all $x \in ((\mathbb{R}^K)^D)$ and $s \in [0,1]$, we have:
+\begin{equation}
+    q_*(x,s)
+    =
+    \mathbb{E}[X_1 \mid X_t = x, t = s]
+\end{equation}
+or equivalently, for each position $d \in \{1,\dots,D\}$,
+\begin{equation}
+    q_*^{(d)}(x,s)
+    =
+    \mathbb{E}[X_1^{(d)} \mid X_t = x, t = s].
+\end{equation}
+
+Now let $x_i \in \{e_1,\dots,e_K\}^D$ denote the $i$-th sequence in the dataset. Since
+\begin{equation}
+    X_t = (1-t)X_0 + tX_1,
+\end{equation}
+conditioning on the event $X_1 = x_i$ gives
+\begin{equation}
+    X_t = (1-t)X_0 + t x_i.
+\end{equation}
+Hence, for $t \in [0,1)$,
+\begin{equation}
+    p_t(x \mid X_1 = x_i)
+    =
+    \frac{1}{(1-t)^{DK}}\,
+    p_0\!\left(\frac{x - t x_i}{1-t}\right),
+\end{equation}
+where the factor $(1-t)^{-D(K-1)}$ comes from the affine change of variables on the ambient simplex product space, and is independent of $i$.
+
+Therefore, by Bayes' rule,
+\begin{equation}
+    \lambda_i(x,s)
+    :=
+    \mathbb{P}[X_1 = x_i \mid X_t = x, t = s]
+    =
+    \frac{
+        p_0\!\left(\frac{x - s x_i}{1-s}\right)\hat{p}_{data}(x_i)
+    }{
+        \sum_{j=1}^{n}
+        p_0\!\left(\frac{x - s x_j}{1-s}\right)\hat{p}_{data}(x_j)
+    }.
+\end{equation}
+
+Since $\hat{p}_{data}(x_i)=\frac{1}{n}$ for all $i$, this simplifies to
+\begin{equation}
+    \lambda_i(x,s)
+    =
+    \frac{
+        p_0\!\left(\frac{x - s x_i}{1-s}\right)
+    }{
+        \sum_{j=1}^{n}
+        p_0\!\left(\frac{x - s x_j}{1-s}\right)
+    }.
+\end{equation}
+
+We finally obtain the closed-form solution:
+\begin{equation}
+\boxed{
+    q_*(x,s)
+    =
+    \sum_{i=1}^{n} \lambda_i(x,s)\, x_i
+}
+\end{equation}
+
+Equivalently, at each position $d$,
+\begin{equation}
+    q_*^{(d)}(x,s)
+    =
+    \sum_{i=1}^{n} \lambda_i(x,s)\, x_i^{(d)},
+\end{equation}
+
+Thus, exactly as in the one-dimensional case, the optimal predictor is a barycenter of the dataset points, with posterior weights given by the probability that each training sequence $x_i$ generated the observation $x$ at time $s$.\\
+One could think that the solution would end up being a product of independent categorical distributions at each position, but this is only the case if the initial distribution $p_0$ and the data distribution $\hat{p}_{data}$ both factorize as a product of independent distributions at each position.
+
+\end{document}

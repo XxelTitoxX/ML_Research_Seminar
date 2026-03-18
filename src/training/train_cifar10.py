@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import wandb
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
+from torchvision.utils import save_image, make_grid
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,8 +52,6 @@ class TrainConfig:
     eval_nll_hutchinson: int = 4
     seed: int = 42
 
-    num_channels: int = 128
-    proj_channels: int = 64
     catflow_sigma_min: float = 1e-6
     tqdm_disable: bool = True
 
@@ -75,7 +74,7 @@ def pick_device() -> torch.device:
         return torch.device("cpu")
 
 
-def load_cifar10(batch_size: int, data_root: str, train: bool = True, num_workers: int = 4) -> DataLoader:
+def load_cifar10(batch_size: int, data_root: str, train: bool = True, num_workers: int = 4, drop_last: bool = True) -> DataLoader:
     transform = transforms.Compose(
         [
             transforms.Resize(32),
@@ -88,7 +87,7 @@ def load_cifar10(batch_size: int, data_root: str, train: bool = True, num_worker
         dataset,
         batch_size=batch_size,
         shuffle=train,
-        drop_last=train,
+        drop_last=drop_last,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )
@@ -111,7 +110,7 @@ def maybe_prepare_quantized_dataset(train:bool, config: TrainConfig, device: tor
         return torch.load(q_path, map_location="cpu")
 
     print("[data] Quantized dataset not found. Loading CIFAR-10 and quantizing...")
-    loader = load_cifar10(config.batch_size, str(ROOT / config.data_raw_dir), train=train, num_workers=config.num_workers)
+    loader = load_cifar10(config.batch_size, str(ROOT / config.data_raw_dir), train=train, num_workers=config.num_workers, drop_last=False)
 
     all_indices: list[torch.Tensor] = []
     latent_h: int | None = None
@@ -269,6 +268,7 @@ def evaluate(
     latent_w: int,
     embed_dim: int,
     device: torch.device,
+    step: int,
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
 
@@ -278,6 +278,7 @@ def evaluate(
         remaining = eval_num_samples
         gen_feat = torch.empty(eval_num_samples, train_dino_feat.shape[1], device=torch.device("cpu"))
         print(f"[eval] Generating {eval_num_samples} samples...")
+        first_batch = True
         while remaining > 0:
             curr_batch = min(batch_size, remaining)
             samples = flow.sample(curr_batch).detach()  # [B, D, K]
@@ -291,6 +292,15 @@ def evaluate(
             start = eval_num_samples - remaining
             gen_feat[start : start + curr_batch] = gen_feat_b.to("cpu")
             remaining -= curr_batch
+            if first_batch:
+                # Save some reconstructions for visualization
+                n_viz = min(6, curr_batch)
+                recon_viz = recon[:n_viz].cpu()
+                recon_viz = (recon_viz + 1.0) * 0.5
+                recon_viz = recon_viz.clamp(0.0, 1.0)
+                grid = make_grid(recon_viz, nrow=n_viz)
+                save_image(grid, f"/outputs/sample_recon_step{step}.png")
+                first_batch = False
         
         print("[eval] Computing FID...")
         fid = compute_fid(train_dino_feat, gen_feat)
@@ -314,28 +324,30 @@ def evaluate(
             metrics["eval/val_fm_ce"] = float(np.mean(val_losses))
 
     # 3) Small-subset validation NLL estimate via reverse ODE (expensive; keep small).
-    eps = 1e-4
-    processed = 0
-    nll_chunks: list[torch.Tensor] = []
-    nll_batch_size = 32
-    print(f"[eval] Computing NLL estimate...")
-    for (x1_idx,) in test_loader:
-        if processed >= eval_nll_samples:
-            break
-        keep = min(eval_nll_samples - processed, x1_idx.shape[0], nll_batch_size)
-        x1_idx = x1_idx[:keep].to(device=device, dtype=torch.long)
-        x1 = F.one_hot(x1_idx, num_classes=codebook_size).to(dtype=torch.float32)
-        x1 = x1 * (1.0 - eps) + (eps / codebook_size)
+    EVAL_NLL = False
+    if EVAL_NLL:
+        eps = 1e-4
+        processed = 0
+        nll_chunks: list[torch.Tensor] = []
+        nll_batch_size = 32
+        print(f"[eval] Computing NLL estimate...")
+        for (x1_idx,) in test_loader:
+            if processed >= eval_nll_samples:
+                break
+            keep = min(eval_nll_samples - processed, x1_idx.shape[0], nll_batch_size)
+            x1_idx = x1_idx[:keep].to(device=device, dtype=torch.long)
+            x1 = F.one_hot(x1_idx, num_classes=codebook_size).to(dtype=torch.float32)
+            x1 = x1 * (1.0 - eps) + (eps / codebook_size)
 
-        logp = flow.logp(x1, n_samples=eval_nll_hutchinson).to(device=device)
-        nll_chunks.append((-logp).detach())
-        processed += keep
+            logp = flow.logp(x1, n_samples=eval_nll_hutchinson).to(device=device)
+            nll_chunks.append((-logp).detach())
+            processed += keep
 
-    if nll_chunks:
-        nll = torch.cat(nll_chunks, dim=0).mean().item()
-        bits_per_token = nll / (np.log(2.0) * flow.obs_dim[0])
-        metrics["eval/val_nll"] = float(nll)
-        metrics["eval/val_bits_per_token"] = float(bits_per_token)
+        if nll_chunks:
+            nll = torch.cat(nll_chunks, dim=0).mean().item()
+            bits_per_token = nll / (np.log(2.0) * flow.obs_dim[0])
+            metrics["eval/val_nll"] = float(nll)
+            metrics["eval/val_bits_per_token"] = float(bits_per_token)
 
     return metrics
 
@@ -348,7 +360,6 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--ckpt_every", type=int, default=5000)
     parser.add_argument("--eval_every", type=int, default=1000)
-    parser.add_argument("--proj_channels", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb_run_name", type=str, default=None)
@@ -362,7 +373,6 @@ def parse_args() -> TrainConfig:
     cfg.warmup_steps = args.warmup_steps
     cfg.ckpt_every = args.ckpt_every
     cfg.eval_every = args.eval_every
-    cfg.proj_channels = args.proj_channels
     cfg.num_workers = args.num_workers
     cfg.seed = args.seed
     cfg.wandb_run_name = args.wandb_run_name
@@ -427,9 +437,9 @@ def main() -> None:
         codebook_dim=codebook_embed_dim,
         grid_h=latent_h,
         grid_w=latent_w,
-        dim=512,
-        n_layer=8,
-        n_head=8,
+        dim=768,
+        n_layer=12,
+        n_head=12,
         input_dropout_p=0.1,
         resid_dropout_p=0.1,
         ffn_dropout_p=0.1,
@@ -496,7 +506,7 @@ def main() -> None:
                 )
 
             if step % config.ckpt_every == 0:
-                ckpt_path = ROOT / config.checkpoints_dir / f"unet_{step}.pt"
+                ckpt_path = ROOT / config.checkpoints_dir / f"step_{step}.pt"
                 save_checkpoint(
                     ckpt_path,
                     step,
@@ -528,6 +538,7 @@ def main() -> None:
                     latent_w=latent_w,
                     embed_dim=codebook_embed_dim,
                     device=device,
+                    step=step,
                 )
                 wandb.log(metrics, step=step)
                 print(
@@ -539,7 +550,7 @@ def main() -> None:
 
     # Final checkpoint
     final_step = step
-    final_path = ROOT / config.checkpoints_dir / f"unet_{final_step}.pt"
+    final_path = ROOT / config.checkpoints_dir / f"step_{final_step}.pt"
     save_checkpoint(
         final_path,
         final_step,
