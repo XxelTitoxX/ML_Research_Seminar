@@ -141,7 +141,7 @@ def main():
     vq_model.load_state_dict(torch.load("checkpoints/vq_cifar_epoch_20.pt", map_location=device)["model_state_dict"])
     vq_model.eval()
 
-    # maybe_prepare_quantized_dataset(train=True, device=device, vq_model=vq_model)
+    maybe_prepare_quantized_dataset(train=True, device=device, vq_model=vq_model)
 
     flow, model_cfg, obs_dim = load_catflow_from_checkpoint(
         flow_checkpoint_path=Path("checkpoints/step_25000.pt"),
