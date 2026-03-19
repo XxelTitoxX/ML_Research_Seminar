@@ -402,7 +402,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--test_key", type=str, default=None)
     parser.add_argument("--num_classes", type=int, default=None)
     parser.add_argument("--loss", type=str, default="kld", choices=["kld", "mse"], help="Loss to optimize: CE or MSE.")
-    parser.add_argument("--prior", type=str, default="uniform", choices=["uniform", "gaussian"], help="Prior distribution for CatFlow.")
+    parser.add_argument("--prior", type=str, default="uniform", choices=["uniform", "gaussian", "gaussian_scaled"], help="Prior distribution for CatFlow.")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=2e-4)

@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, TensorDataset, Dataset
@@ -27,30 +28,73 @@ def pick_device():
     else:
         return torch.device("cpu")
     
-def load_uniprot(data_root: str, batch_size: int, train: bool = True, shuffle: bool = True) -> DataLoader:
+def load_uniprot(data_root: str, batch_size: int, train: bool = True, labels: bool = False, shuffle: bool = True) -> DataLoader:
     split = "train" if train else "test"
-    data_path = Path(data_root) / f"uniprot_{split}.pt"
-    data = torch.load(data_path, map_location="cpu")
-    indices = data["indices"]  # shape: (N, seq_len)
-    seq_len = indices.shape[1]
+    proportion = "9k" if train else "1k"
+    data_path = Path(data_root) / f"uniprot_{split}{proportion}.pt"
+    indices_tensor = torch.load(data_path, map_location="cpu")
+    if labels:
+        dataset = TensorDataset(indices_tensor, torch.zeros(len(indices_tensor), dtype=torch.long))  # dummy labels
+    else:
+        dataset = TensorDataset(indices_tensor)
     num_classes = 22
-    dataset = TensorDataset(indices)
     def collate_fn(batch):
         indices_batch = torch.stack([item[0] for item in batch]).to(dtype=torch.long)  # shape: (batch_size, seq_len)
         one_hot_batch = F.one_hot(indices_batch, num_classes=num_classes).float()  # shape: (batch_size, seq_len, num_classes)
+        if len(batch[0]) == 2:  # If labels are present, also collate them
+            labels_batch = torch.tensor([item[1] for item in batch], dtype=torch.long)  # shape: (batch_size,)
+            return one_hot_batch, labels_batch
         return one_hot_batch
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
+
+# Global plotting style for paper figures
+mpl.rcParams.update({
+    "figure.figsize": (8, 5), 
+    "font.size": 10,
+    "axes.labelsize": 10,
+    "axes.titlesize": 10,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9,
+    "lines.linewidth": 2.0,
+    "axes.grid": False,
+    "grid.alpha": 0.25,
+    "grid.linestyle": "--",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.02,
+})
+
+def make_plot(ts, error_t, out_path, logy=False):
+    fig, ax = plt.subplots()
+
+    ax.plot(ts.cpu(), error_t.cpu())   # no marker
+    ax.set_xlabel("Time $t$")
+    ax.set_ylabel("Average $\\ell_2$ error" + (" (log scale)" if logy else ""))
+
+    if logy:
+        ax.set_yscale("log")
+
+    # subtle horizontal grid only
+    ax.grid(True, axis="y", alpha=0.25, linestyle="--")
+
+    fig.savefig(out_path)
+    plt.close(fig)
 
 def main():
     torch.backends.cudnn.benchmark = True
     device = pick_device()
 
     flow, model_cfg, obs_dim = load_catflow_checkpoint(
-        flow_checkpoint_path=CHECKPOINTS / "step_25000.pt",
+        flow_checkpoint_path=CHECKPOINTS / "kld_9k_uniform_21000.pt",
         device=device,
     )
     flow.eval()
+    flow.loss = "kld"  # override loss just for error computation
+    flow.p0 = "uniform"  # override prior just for error computation
+    print(f"Loaded CatFlow checkpoint : loss={flow.loss}, prior={flow.p0}, obs_dim={obs_dim}")
 
     cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
     
@@ -64,8 +108,8 @@ def main():
 
     # Create dataloader of sequences of one-hot encoded codebook indices
     # DO NOT USE SHUFFLE for x1' dataloader !
-    dataloader_xt = load_uniprot(DATA_PROCESSED, batch_size=batch_size_xt, train=True, shuffle=True)
-    dataloader_x1prime = load_uniprot(DATA_PROCESSED, batch_size=batch_size_x1prime, train=True, shuffle=False)
+    dataloader_xt = load_uniprot(DATA_PROCESSED, batch_size=batch_size_xt, train=True, labels=True, shuffle=True)
+    dataloader_x1prime = load_uniprot(DATA_PROCESSED, batch_size=batch_size_x1prime, train=True, labels=False, shuffle=False)
 
     error_t = torch.zeros_like(ts)
     with torch.inference_mode():
@@ -98,22 +142,8 @@ def main():
             error_t[i] /= n_xt_samples
             print(f"Average L2 error at t={t.item():.4f}: {error_t[i].item():.4f}")
     
-    plt.figure(figsize=(8, 5))
-    plt.plot(ts.cpu(), error_t.cpu(), marker='o')
-    plt.title("Velocity Error vs Time")
-    plt.xlabel("Time (t)")
-    plt.ylabel("Average L2 Error")
-    plt.grid()
-    plt.savefig("velocity_error.png")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(ts.cpu(), error_t.cpu(), marker='o')
-    plt.title("Velocity Error vs Time")
-    plt.xlabel("Time (t)")
-    plt.ylabel("Average L2 Error")
-    plt.ylim(0, error_t[:len(ts)//2].max().item() * 1.1)  # zoom in on first half of time steps
-    plt.grid()
-    plt.savefig("velocity_error_zoomed.png")
+    make_plot(ts, error_t, "velocity_error.png", logy=False)
+    make_plot(ts, error_t, "velocity_error_log.png", logy=True)
 
         
 

@@ -30,7 +30,7 @@ class CatFlow(nn.Module):
         self.clamp_t: float = 0.05 # from Categorical Flow Map repository
         self.softmax = nn.Softmax(-1)
         self.p0: str = p0  # "uniform" or "gaussian"
-        assert self.p0 in ["uniform", "gaussian"], "Invalid prior choice"
+        assert self.p0 in ["uniform", "gaussian", "gaussian_scaled"], "Invalid prior choice"
 
     @staticmethod
     def sample_simplex(*sizes, device="cpu", eps=1e-4):
@@ -43,6 +43,10 @@ class CatFlow(nn.Module):
     @staticmethod
     def sample_gaussian(*sizes, device="cpu"):
         return torch.randn(*sizes, device=device)
+    
+    def sample_scaled_gaussian(self, *sizes, device="cpu"):
+        return torch.randn(*sizes, device=device) / (self.obs_dim[1] ** 0.5)
+    
 
     def sample_prior(self, *size, device=None, eps=None):
         if eps is None:
@@ -53,6 +57,8 @@ class CatFlow(nn.Module):
             return self.sample_simplex(*size, device=device, eps=eps)
         elif self.p0 == "gaussian":
             return self.sample_gaussian(*size, device=device)
+        elif self.p0 == "gaussian_scaled":
+            return self.sample_scaled_gaussian(*size, device=device)
         
     @staticmethod
     def logp_gaussian(x):
@@ -60,20 +66,39 @@ class CatFlow(nn.Module):
         return -0.5 * torch.sum(x**2, dim=(-1, -2)) - 0.5 * D * math.log(2 * math.pi)
 
     @staticmethod
-    def logp_uniform(x):
+    def logp_uniform(x, atol=1e-3):
         """
         Log-density of uniform prior on simplex.
-        p0: (B1, B2, ..., D, K) tensor of probabilities (last dim sums to 1)
+        x: (B1, B2, ..., D, K) tensor of probabilities (last dim should sum to 1)
         """
         batch_shape = x.shape[:-2]
         D, K = x.shape[-2:]
-        return torch.full(batch_shape, D * math.lgamma(K), device=x.device, dtype=x.dtype)
+        # Log-density is -inf outside the simplex, and -log(volume) inside
+        nonneg = (x >= -atol).all(dim=-1)  # (..., D)
+        sums1 = torch.isclose(
+            x.sum(dim=-1),
+            torch.ones_like(x[..., 0]),
+            atol=atol,
+            rtol=0.0,
+        )  # (..., D)
+
+        on_simplex = (nonneg & sums1).all(dim=-1)  # (...,)
+
+        logp = torch.full(batch_shape, D * math.lgamma(K), device=x.device, dtype=x.dtype)
+        return logp.masked_fill(~on_simplex, float("-inf"))
+    
+    def logp_gaussian_scaled(self, x):
+        D = x.shape[-1] * x.shape[-2]
+        scale = self.obs_dim[1] ** 0.5
+        return -0.5 * torch.sum((x * scale)**2, dim=(-1, -2)) - 0.5 * D * math.log(2 * math.pi) + D * math.log(scale)
     
     def prior_logp0(self, x):
         if self.p0 == "uniform":
             return self.logp_uniform(x)
         elif self.p0 == "gaussian":
             return self.logp_gaussian(x)
+        elif self.p0 == "gaussian_scaled":
+            return self.logp_gaussian_scaled(x)
     
     def process_timesteps(self, t, x):
         if len(t.shape) == 0:
