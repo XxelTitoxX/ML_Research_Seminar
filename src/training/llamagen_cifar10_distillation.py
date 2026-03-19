@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from tqdm import tqdm
+from torch_fidelity import calculate_metrics
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -44,7 +45,7 @@ def main():
         batch_size=64,
         n_epochs=50,
         sample_every_steps=500,
-        save_every_epochs=5,
+        save_every_epochs=1,
         lr=5e-5,
         grad_clip=5.0,
         slow_mu=0.999,
@@ -53,6 +54,7 @@ def main():
         nb_teacher_steps=8,
         ratio_teacher_samples=0.6,
         resume_checkpoint=None,
+        fid_samples=1024
     )
 
     wandb.init(project="distillation-catflow-cifar10", config=config)
@@ -114,6 +116,7 @@ def main():
     
     dataloader = load_cifar10(config["batch_size"])
     timesteps = torch.linspace(0, 1, config["nb_teacher_steps"] + 1, device=device)
+    fid_samples = config["fid_samples"]
 
     opt = torch.optim.AdamW(
         student_model.parameters(), lr=config["lr"], weight_decay=0.05
@@ -242,15 +245,44 @@ def main():
             epoch_loss += loss.item()
 
             if global_step % config["sample_every_steps"] == 0:
-                student_model.eval()
-                imgs = vfm.generate(
-                    n_samples=4,
-                    cond_idx=torch.randint(0, 10, (4,), device=device),
-                    n_steps=config["nb_teacher_steps"],
-                    method="euler",
-                )
-                grid = utils.make_grid((imgs.clamp(-1, 1) + 1) / 2, nrow=4)
-                wandb.log({"samples": wandb.Image(grid)}, step=global_step)
+                orig_model = vfm.model
+                vfm.model = slow_ema_model.module
+                vfm.model.eval()
+
+                with torch.no_grad(), torch.amp.autocast("cuda"):
+                    sample_cond = torch.randint(0, 10, (4,), device=device)
+                    visual_imgs = vfm.generate(
+                        n_samples=4,
+                        cond_idx=sample_cond,
+                        n_steps=config["nb_teacher_steps"],
+                        method="euler",
+                    )
+                    grid = utils.make_grid((visual_imgs.clamp(-1, 1) + 1) / 2, nrow=4)
+
+                    pbar_fid = tqdm(range(0, config["fid_samples"], 64), desc="Calculating FID", leave=False)
+                    fid_tensors = []
+                    
+                    for _ in pbar_fid:
+                        c = torch.randint(0, 10, (64,), device=device)
+                        out = vfm.generate(n_samples=64, cond_idx=c, n_steps=config["nb_teacher_steps"])
+                        out = ((out.clamp(-1, 1) + 1) * 127.5).to(torch.uint8)
+                        fid_tensors.append(out)
+                    
+                    full_fid_tensor = torch.cat(fid_tensors, dim=0)
+                    metrics = calculate_metrics(
+                        input1=full_fid_tensor,
+                        input2='cifar10-train', 
+                        cuda=True,
+                        fid=True,
+                        verbose=False,
+                    )
+
+                wandb.log({
+                    "samples": wandb.Image(grid),
+                    "eval/fid": metrics['frechet_inception_distance']
+                }, step=global_step)
+
+                vfm.model = orig_model
                 student_model.train()
 
             if global_step % 10 == 0:
