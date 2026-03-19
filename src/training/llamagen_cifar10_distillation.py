@@ -214,17 +214,20 @@ def main():
                     P_target_S = alpha[nb_teacher:] * P1_S + beta[nb_teacher:] * P2_S
 
                     P_target = torch.cat([P_target_T, P_target_S], dim=0)
+                    target_idx = P_target.argmax(dim=-1)
 
                 _, _, student_logits = get_probs_vel_logits(
                     student_model, t1, x_t1, cond_idx
                 )
-                log_probs = F.log_softmax(student_logits, dim=-1)
-                loss_per_token = F.kl_div(log_probs, P_target, reduction='none').sum(dim=-1)
+                loss_per_token = F.cross_entropy(student_logits.transpose(1, 2), target_idx, reduction='none')
                 loss_per_image = loss_per_token.mean(dim=1)
                 distillation_loss = loss_per_image[:nb_teacher].mean()     
                 self_consistency_loss = loss_per_image[nb_teacher:].mean()
                 loss = (distillation_loss * nb_teacher + self_consistency_loss * nb_student) / config["batch_size"]
 
+            with torch.no_grad():
+                student_probs = F.softmax(student_logits, dim=-1)
+                student_entropy = -torch.sum(student_probs * torch.log(student_probs + EPS), dim=-1).mean()
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             grad_norm = torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=config["grad_clip"])
@@ -255,7 +258,8 @@ def main():
                         "train/total_loss": loss.item(),
                         "train/distillation_loss": distillation_loss.item(),
                         "train/self_consistency_loss": self_consistency_loss.item(),
-                        "train/grad_norm": grad_norm
+                        "train/grad_norm": grad_norm,
+                        "train/student_entropy": student_entropy.item()
                     }, step=global_step)
         avg_loss = epoch_loss / len(dataloader)
         wandb.log({
