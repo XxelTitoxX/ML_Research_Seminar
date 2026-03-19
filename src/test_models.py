@@ -25,8 +25,15 @@ def main():
     vq_model.eval()
 
     model = GPT_B(vocab_size=512, num_classes=10, block_size=256).to(device)
-    checkpoint = torch.load("checkpoints/epoch_250.pt", map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint = torch.load("checkpoints/distilled_llamagen_epoch_5.pt", map_location=device)
+    state_dict = checkpoint["ema_state_dict"]
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("_orig_mod.", "")
+        new_key = new_key.replace("module.", "")
+        new_state_dict[new_key] = v
+
+    model.load_state_dict(new_state_dict)
     model.eval()
     
     try:
@@ -40,7 +47,7 @@ def main():
     cond_idx_vis = torch.arange(10, device=device).repeat(4)
     
     with torch.no_grad(), torch.autocast(device_type="cuda"):
-        vis_imgs = vfm_wrapper.generate(n_samples=40,n_steps=250,method="euler", cond_idx=cond_idx_vis)
+        vis_imgs = vfm_wrapper.generate(n_samples=40,n_steps=8,method="euler", cond_idx=cond_idx_vis)
         vis_imgs = (vis_imgs.clamp(-1, 1) + 1) / 2
         vis_imgs = vis_imgs.float().cpu()
 
@@ -78,7 +85,7 @@ def main():
         real_processed += images.size(0)
 
     fake_processed = 0
-    batch_size_gen = 1024
+    batch_size_gen = 512
 
     with torch.no_grad():
         with tqdm(total=num_fid_samples, desc="Fake images FID") as pbar:
@@ -87,7 +94,7 @@ def main():
                 cond_idx_gen = torch.randint(0, 10, (current_batch,), device=device)
                 
                 with torch.autocast(device_type="cuda"):
-                    fake_imgs = vfm_wrapper.generate(n_samples=current_batch, cond_idx=cond_idx_gen)
+                    fake_imgs = vfm_wrapper.generate(n_samples=current_batch, n_steps=8, method="euler", cond_idx=cond_idx_gen)
                     
                 fake_imgs_uint8 = ((fake_imgs.clamp(-1, 1) + 1) / 2 * 255).to(torch.uint8)
                 fid.update(fake_imgs_uint8, real=False)
