@@ -17,7 +17,7 @@ def unpack_state(z, d, k):
     return x, f
 
 class CatFlow(nn.Module):
-    def __init__(self, model, obs_dim=(2,), loss="kld", sigma_min=0.0, n_samples=10, prior_eps=1e-4):
+    def __init__(self, model, obs_dim=(2,), loss="kld", p0 = "uniform", sigma_min=0.0, n_samples=10, prior_eps=1e-4):
         super().__init__()
         self.model = model
         self.sigma_min = sigma_min
@@ -29,6 +29,8 @@ class CatFlow(nn.Module):
         self.eps_ = 1e-6
         self.clamp_t: float = 0.05 # from Categorical Flow Map repository
         self.softmax = nn.Softmax(-1)
+        self.p0: str = p0  # "uniform" or "gaussian"
+        assert self.p0 in ["uniform", "gaussian"], "Invalid prior choice"
 
     @staticmethod
     def sample_simplex(*sizes, device="cpu", eps=1e-4):
@@ -37,23 +39,41 @@ class CatFlow(nn.Module):
         p = x / x.sum(dim=-1, keepdim=True)
         p = p.clamp(eps, 1 - eps)
         return p / p.sum(dim=-1, keepdim=True)
+    
+    @staticmethod
+    def sample_gaussian(*sizes, device="cpu"):
+        return torch.randn(*sizes, device=device)
 
     def sample_prior(self, *size, device=None, eps=None):
         if eps is None:
             eps = self.prior_eps
         if device is None:
             device = next(self.parameters()).device
-        return self.sample_simplex(*size, device=device, eps=eps)
+        if self.p0 == "uniform":
+            return self.sample_simplex(*size, device=device, eps=eps)
+        elif self.p0 == "gaussian":
+            return self.sample_gaussian(*size, device=device)
+        
+    @staticmethod
+    def logp_gaussian(x):
+        D = x.shape[-1] * x.shape[-2]
+        return -0.5 * torch.sum(x**2, dim=(-1, -2)) - 0.5 * D * math.log(2 * math.pi)
 
     @staticmethod
-    def prior_logp0(p0, eps=1e-4):
+    def logp_uniform(x):
         """
         Log-density of uniform prior on simplex.
         p0: (B1, B2, ..., D, K) tensor of probabilities (last dim sums to 1)
         """
-        batch_shape = p0.shape[:-2]
-        D, K = p0.shape[-2:]
-        return torch.full(batch_shape, D * math.lgamma(K), device=p0.device, dtype=p0.dtype)
+        batch_shape = x.shape[:-2]
+        D, K = x.shape[-2:]
+        return torch.full(batch_shape, D * math.lgamma(K), device=x.device, dtype=x.dtype)
+    
+    def prior_logp0(self, x):
+        if self.p0 == "uniform":
+            return self.logp_uniform(x)
+        elif self.p0 == "gaussian":
+            return self.logp_gaussian(x)
     
     def process_timesteps(self, t, x):
         if len(t.shape) == 0:
@@ -140,9 +160,20 @@ class CatFlow(nn.Module):
         self.device = next(self.parameters()).device
         x0 = self.sample_prior(n_samples, *list(self.obs_dim), device=self.device)
         t = torch.linspace(0,1-self.clamp_t,n_steps, device=self.device)
-        with torch.no_grad():
-            # return odeint(self.velocity, x0, t, rtol=rtol, atol=atol, method=method, adjoint_params = self.model.parameters())[-1,:,:]
-            return solve_ode(self.velocity, x0, t, method=method)
+
+        def velocity_with_projection(t, x):
+            # We suppose x is in the simplex
+            # We want x + dt * v to also be in the simplex, which is more stable if v is in the tangent space of the simplex.
+            v = self.velocity(t, x)
+            v_proj = v - v.mean(dim=-1, keepdim=True)
+            return v_proj
+
+        if self.p0 == "uniform":
+                velocity_fn = velocity_with_projection
+        else:
+            velocity_fn = self.velocity
+        with torch.no_grad():       
+            return solve_ode(velocity_fn, x0, t, method=method)
         
 
     def approx_div(self, f_x, x, retain_graph=False):

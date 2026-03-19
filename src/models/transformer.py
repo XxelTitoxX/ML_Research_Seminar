@@ -408,7 +408,6 @@ class CatFlowTransformer(nn.Module):
             raise ValueError(f"Expected K={self.config.num_classes}, got K={K}")
 
         if self.codebook is None:
-            x_t = x_t - (1.0 / self.config.num_classes)
             h = self.input_proj(x_t)
         else:
             # [B, D, K] -> [B, D, C_vae]
