@@ -19,6 +19,14 @@ from models.llama_models import GPT_B
 from models.vq_model import VQ_Cifar_L
 from models.vfm_wrapper import LlamaCatFlow
 
+class FIDDataset(torch.utils.data.Dataset):
+    def __init__(self, tensor):
+        self.tensor = tensor
+    def __len__(self):
+        return self.tensor.shape[0]
+    def __getitem__(self, idx):
+        return self.tensor[idx]
+
 
 def load_cifar10(batch_size):
     transform = transforms.Compose(
@@ -245,33 +253,36 @@ def main():
             epoch_loss += loss.item()
 
             if global_step % config["sample_every_steps"] == 0:
+                # 1. Temporarily swap the wrapper's model to the Slow EMA
                 orig_model = vfm.model
-                vfm.model = slow_ema_model.module
+                vfm.model = slow_ema_model.module # Use .module for AveragedModel
                 vfm.model.eval()
 
                 with torch.no_grad(), torch.amp.autocast("cuda"):
+                    # 2. Visual grid for inspection
                     sample_cond = torch.randint(0, 10, (4,), device=device)
-                    visual_imgs = vfm.generate(
-                        n_samples=4,
-                        cond_idx=sample_cond,
-                        n_steps=config["nb_teacher_steps"],
-                        method="euler",
-                    )
+                    visual_imgs = vfm.generate(n_samples=4, cond_idx=sample_cond, n_steps=config["nb_teacher_steps"])
                     grid = utils.make_grid((visual_imgs.clamp(-1, 1) + 1) / 2, nrow=4)
 
-                    pbar_fid = tqdm(range(0, config["fid_samples"], 64), desc="Calculating FID", leave=False)
+                    # 3. Collect samples for FID
                     fid_tensors = []
-                    
+                    pbar_fid = tqdm(range(0, config["fid_samples"], 64), desc="FID Sampling", leave=False)
                     for _ in pbar_fid:
                         c = torch.randint(0, 10, (64,), device=device)
                         out = vfm.generate(n_samples=64, cond_idx=c, n_steps=config["nb_teacher_steps"])
+                        # Fidelity expects uint8 [0, 255]
                         out = ((out.clamp(-1, 1) + 1) * 127.5).to(torch.uint8)
-                        fid_tensors.append(out)
+                        fid_tensors.append(out.cpu())
                     
                     full_fid_tensor = torch.cat(fid_tensors, dim=0)
+                    
+                    # 4. Wrap tensor in Dataset for torch-fidelity
+                    fid_input = FIDDataset(full_fid_tensor)
+
+                    # 5. Compute Metrics
                     metrics = calculate_metrics(
-                        input1=full_fid_tensor,
-                        input2='cifar10-train', 
+                        input1=fid_input,
+                        input2='cifar10-train',
                         cuda=True,
                         fid=True,
                         verbose=False,
