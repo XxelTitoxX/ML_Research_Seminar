@@ -132,14 +132,16 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config["n_epochs"] * len(dataloader))
 
     # Functional helper to get probs and velocity using the wrapper's logic but varying the model
-    def get_probs_vel_logits(model_instance, t, x, cond):
-        # We temporarily point vfm.model to the instance we want to query
+    def get_probs_vel_logits(model_instance, t, x, cond, temperature=1.0):
         orig_model = vfm.model
         vfm.model = model_instance
 
         t_proc = vfm.process_timesteps(t.view(-1), x)
         logits = vfm.model(t_proc, x, cond_idx=cond)
-        probs = F.softmax(logits, dim=-1)
+        
+        # --- THE FIX: Apply temperature to sharpen the distribution ---
+        probs = F.softmax(logits / temperature, dim=-1)
+        
         mu_t = torch.matmul(probs, codebook)
         vel = (mu_t - x) / (1 - t_proc.view(-1, 1, 1) + vfm.eps_)
 
@@ -200,40 +202,46 @@ def main():
                 beta = ((t3 - t2) / (t3 - t1 + EPS)) * ((1 - t1) / (1 - t2 + EPS))
 
                 with torch.no_grad():
+                    # 1. Teacher Path (Pure knowledge, T = 1.0)
                     P1_T, V1_T, _ = get_probs_vel_logits(
-                        teacher_model,
-                        t1[:nb_teacher],
-                        x_t1[:nb_teacher],
-                        cond_idx[:nb_teacher],
+                        teacher_model, t1[:nb_teacher], x_t1[:nb_teacher], cond_idx[:nb_teacher], temperature=1.0
                     )
                     x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_T
+                    
+                    # 2. EMA Path (Sharpened to prevent collapse, T = 0.5)
                     P2_T, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher]
+                        slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher], temperature=0.5
                     )
                     P_target_T = alpha[:nb_teacher] * P1_T + beta[:nb_teacher] * P2_T
 
+                    # 3. Student Consistency Path (Sharpened, T = 0.5)
                     P1_S, V1_S, _ = get_probs_vel_logits(
-                        fast_ema_model,
-                        t1[nb_teacher:],
-                        x_t1[nb_teacher:],
-                        cond_idx[nb_teacher:],
+                        fast_ema_model, t1[nb_teacher:], x_t1[nb_teacher:], cond_idx[nb_teacher:], temperature=0.5
                     )
                     x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_S
+                    
                     P2_S, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:]
+                        slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:], temperature=0.5
                     )
                     P_target_S = alpha[nb_teacher:] * P1_S + beta[nb_teacher:] * P2_S
 
                     P_target = torch.cat([P_target_T, P_target_S], dim=0)
-                    target_idx = P_target.argmax(dim=-1)
 
+                # --- Student Update ---
                 _, _, student_logits = get_probs_vel_logits(
-                    student_model, t1, x_t1, cond_idx
+                    student_model, t1, x_t1, cond_idx, temperature=1.0 # Student predicts normally
                 )
-                loss_per_token = F.cross_entropy(student_logits.transpose(1, 2), target_idx, reduction='none')
+                log_probs = F.log_softmax(student_logits, dim=-1)
+                
+                # --- REVERT TO KL DIVERGENCE ---
+                # This restores the soft-target learning, acting as a massive regularizer
+                # against the overfitting you saw at Epoch 12.
+                loss_per_token = F.kl_div(log_probs, P_target, reduction='none').sum(dim=-1)
+                
                 loss_per_image = loss_per_token.mean(dim=1)
                 distillation_loss = loss_per_image[:nb_teacher].mean()     
                 self_consistency_loss = loss_per_image[nb_teacher:].mean()
+                
                 loss = (distillation_loss * nb_teacher + self_consistency_loss * nb_student) / config["batch_size"]
 
             with torch.no_grad():
@@ -266,10 +274,10 @@ def main():
 
                     # 3. Collect samples for FID
                     fid_tensors = []
-                    pbar_fid = tqdm(range(0, config["fid_samples"], 64), desc="FID Sampling", leave=False)
+                    pbar_fid = tqdm(range(0, config["fid_samples"], 128), desc="FID Sampling", leave=False)
                     for _ in pbar_fid:
-                        c = torch.randint(0, 10, (64,), device=device)
-                        out = vfm.generate(n_samples=64, cond_idx=c, n_steps=config["nb_teacher_steps"])
+                        c = torch.randint(0, 10, (128,), device=device)
+                        out = vfm.generate(n_samples=128, cond_idx=c, n_steps=config["nb_teacher_steps"])
                         # Fidelity expects uint8 [0, 255]
                         out = ((out.clamp(-1, 1) + 1) * 127.5).to(torch.uint8)
                         fid_tensors.append(out.cpu())

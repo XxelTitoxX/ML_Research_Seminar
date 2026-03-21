@@ -25,7 +25,9 @@ def main():
     vq_model.eval()
 
     model = GPT_B(vocab_size=512, num_classes=10, block_size=256).to(device)
-    checkpoint = torch.load("checkpoints/distilled_llamagen_epoch_5.pt", map_location=device)
+    path = "checkpoints/distilled_llamagen_epoch_12.pt"
+    checkpoint = torch.load(path, map_location=device)
+    print(path)
     state_dict = checkpoint["ema_state_dict"]
     new_state_dict = {}
     for k, v in state_dict.items():
