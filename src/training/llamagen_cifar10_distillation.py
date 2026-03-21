@@ -27,6 +27,41 @@ class FIDDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.tensor[idx]
 
+@torch.no_grad()
+def sample(model, vq_vae, codebook, device, cond_idx, steps):
+    model.eval()
+    batch_size = cond_idx.shape[0]
+    z_dim = codebook.shape[-1]
+    
+    # Start from pure noise
+    x = torch.randn(batch_size, 256, z_dim, device=device)
+
+    dt = 1.0 / steps
+
+    for i in range(steps):
+        t_val = i / steps
+        t = torch.full((batch_size,), t_val, device=device)
+
+        logits = model(t, x, cond_idx)
+
+        # 1. NO TEMPERATURE: We evaluate exactly as we trained (T=1.0)
+        # 2. ON-MANIFOLD STEPPING: Use argmax, just like in training
+        idx = logits.argmax(dim=-1)
+        mu_sharp = F.embedding(idx, codebook)
+
+        vel = (mu_sharp - x) / (1.0 - t_val + EPS)
+        x = x + vel * dt
+
+    # Final projection to tokens
+    final_indices = logits.argmax(dim=-1)
+    
+    # Shape for VQ-VAE: [Batch, Height, Width]
+    final_indices = final_indices.view(batch_size, 16, 16)
+    
+    # FIX: Pass the shape argument so VQ-VAE permutes [B, H, W, C] to [B, C, H, W]
+    images = vq_vae.decode_code(final_indices, shape=(batch_size, -1, 16, 16))
+
+    return (images.clamp(-1, 1) + 1) / 2
 
 def load_cifar10(batch_size):
     transform = transforms.Compose(
@@ -132,21 +167,23 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config["n_epochs"] * len(dataloader))
 
     # Functional helper to get probs and velocity using the wrapper's logic but varying the model
-    def get_probs_vel_logits(model_instance, t, x, cond, temperature=1.0):
+    def get_probs_vel_logits(model_instance, t, x, cond):
         orig_model = vfm.model
         vfm.model = model_instance
 
         t_proc = vfm.process_timesteps(t.view(-1), x)
         logits = vfm.model(t_proc, x, cond_idx=cond)
         
-        # --- THE FIX: Apply temperature to sharpen the distribution ---
-        probs = F.softmax(logits / temperature, dim=-1)
+        # 1. Standard probabilities (Used for S-VFM target math)
+        probs = F.softmax(logits, dim=-1)
         
-        mu_t = torch.matmul(probs, codebook)
-        vel = (mu_t - x) / (1 - t_proc.view(-1, 1, 1) + vfm.eps_)
+        # 2. Sharp Velocity (Used strictly for stepping to keep x_t2 On-Manifold)
+        idx = logits.argmax(dim=-1)
+        mu_sharp = F.embedding(idx, codebook)
+        vel_sharp = (mu_sharp - x) / (1 - t_proc.view(-1, 1, 1) + vfm.eps_)
 
         vfm.model = orig_model 
-        return probs, vel, logits
+        return probs, vel_sharp, logits
 
     global_step = 0
     for epoch in range(1, config["n_epochs"] + 1):
@@ -202,40 +239,36 @@ def main():
                 beta = ((t3 - t2) / (t3 - t1 + EPS)) * ((1 - t1) / (1 - t2 + EPS))
 
                 with torch.no_grad():
-                    # 1. Teacher Path (Pure knowledge, T = 1.0)
-                    P1_T, V1_T, _ = get_probs_vel_logits(
-                        teacher_model, t1[:nb_teacher], x_t1[:nb_teacher], cond_idx[:nb_teacher], temperature=1.0
+                    # Teacher path
+                    P1_T, V1_sharp_T, _ = get_probs_vel_logits(
+                        teacher_model, t1[:nb_teacher], x_t1[:nb_teacher], cond_idx[:nb_teacher]
                     )
-                    x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_T
+                    # Step using SHARP velocity to guarantee x_t2 is On-Manifold
+                    x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_sharp_T
                     
-                    # 2. EMA Path (Sharpened to prevent collapse, T = 0.5)
                     P2_T, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher], temperature=0.5
+                        slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher]
                     )
                     P_target_T = alpha[:nb_teacher] * P1_T + beta[:nb_teacher] * P2_T
 
-                    # 3. Student Consistency Path (Sharpened, T = 0.5)
-                    P1_S, V1_S, _ = get_probs_vel_logits(
-                        fast_ema_model, t1[nb_teacher:], x_t1[nb_teacher:], cond_idx[nb_teacher:], temperature=0.5
+                    # Student Consistency path
+                    P1_S, V1_sharp_S, _ = get_probs_vel_logits(
+                        fast_ema_model, t1[nb_teacher:], x_t1[nb_teacher:], cond_idx[nb_teacher:]
                     )
-                    x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_S
+                    x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_sharp_S
                     
                     P2_S, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:], temperature=0.5
+                        slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:]
                     )
                     P_target_S = alpha[nb_teacher:] * P1_S + beta[nb_teacher:] * P2_S
 
                     P_target = torch.cat([P_target_T, P_target_S], dim=0)
 
                 # --- Student Update ---
-                _, _, student_logits = get_probs_vel_logits(
-                    student_model, t1, x_t1, cond_idx, temperature=1.0 # Student predicts normally
-                )
+                _, _, student_logits = get_probs_vel_logits(student_model, t1, x_t1, cond_idx)
                 log_probs = F.log_softmax(student_logits, dim=-1)
-                
-                # --- REVERT TO KL DIVERGENCE ---
-                # This restores the soft-target learning, acting as a massive regularizer
-                # against the overfitting you saw at Epoch 12.
+
+                # Standard KL Divergence (No Temperature Mismatch)
                 loss_per_token = F.kl_div(log_probs, P_target, reduction='none').sum(dim=-1)
                 
                 loss_per_image = loss_per_token.mean(dim=1)
@@ -261,25 +294,20 @@ def main():
             epoch_loss += loss.item()
 
             if global_step % config["sample_every_steps"] == 0:
-                # 1. Temporarily swap the wrapper's model to the Slow EMA
-                orig_model = vfm.model
-                vfm.model = slow_ema_model.module # Use .module for AveragedModel
-                vfm.model.eval()
-
                 with torch.no_grad(), torch.amp.autocast("cuda"):
                     # 2. Visual grid for inspection
                     sample_cond = torch.randint(0, 10, (4,), device=device)
-                    visual_imgs = vfm.generate(n_samples=4, cond_idx=sample_cond, n_steps=config["nb_teacher_steps"])
-                    grid = utils.make_grid((visual_imgs.clamp(-1, 1) + 1) / 2, nrow=4)
+                    visual_imgs = sample(slow_ema_model.module, vq_model, codebook, device, sample_cond, config["nb_teacher_steps"])
+                    grid = utils.make_grid(visual_imgs, nrow=4)
 
                     # 3. Collect samples for FID
                     fid_tensors = []
-                    pbar_fid = tqdm(range(0, config["fid_samples"], 128), desc="FID Sampling", leave=False)
+                    pbar_fid = tqdm(range(0, config["fid_samples"], 256), desc="FID Sampling", leave=False)
                     for _ in pbar_fid:
-                        c = torch.randint(0, 10, (128,), device=device)
-                        out = vfm.generate(n_samples=128, cond_idx=c, n_steps=config["nb_teacher_steps"])
+                        c = torch.randint(0, 10, (256,), device=device)
+                        out = sample(slow_ema_model.module, vq_model, codebook, device, c, config["nb_teacher_steps"])
                         # Fidelity expects uint8 [0, 255]
-                        out = ((out.clamp(-1, 1) + 1) * 127.5).to(torch.uint8)
+                        out = (out * 127.5).to(torch.uint8)
                         fid_tensors.append(out.cpu())
                     
                     full_fid_tensor = torch.cat(fid_tensors, dim=0)
@@ -300,9 +328,6 @@ def main():
                     "samples": wandb.Image(grid),
                     "eval/fid": metrics['frechet_inception_distance']
                 }, step=global_step)
-
-                vfm.model = orig_model
-                student_model.train()
 
             if global_step % 10 == 0:
                 wandb.log({
