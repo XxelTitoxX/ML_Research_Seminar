@@ -33,32 +33,38 @@ def sample(model, vq_vae, codebook, device, cond_idx, steps):
     batch_size = cond_idx.shape[0]
     z_dim = codebook.shape[-1]
     
-    # Start from pure noise
     x = torch.randn(batch_size, 256, z_dim, device=device)
-
-    dt = 1.0 / steps
+    
+    # Create exact timesteps:[0.0, 0.125, 0.25, ..., 1.0]
+    ts = torch.linspace(0, 1.0, steps + 1, device=device)
 
     for i in range(steps):
-        t_val = i / steps
-        t = torch.full((batch_size,), t_val, device=device)
+        t_val = ts[i]
+        t_next = ts[i+1]
+        dt = t_next - t_val
 
+        t = torch.full((batch_size,), t_val, device=device)
         logits = model(t, x, cond_idx)
 
-        # 1. NO TEMPERATURE: We evaluate exactly as we trained (T=1.0)
-        # 2. ON-MANIFOLD STEPPING: Use argmax, just like in training
-        idx = logits.argmax(dim=-1)
-        mu_sharp = F.embedding(idx, codebook)
+        # Step using the exact soft math the model was trained on
+        probs = F.softmax(logits, dim=-1)
+        mu = torch.matmul(probs, codebook)
 
-        vel = (mu_sharp - x) / (1.0 - t_val + EPS)
+        vel = (mu - x) / (1.0 - t_val + EPS)
         x = x + vel * dt
 
-    # Final projection to tokens
-    final_indices = logits.argmax(dim=-1)
+    # x is now fully integrated to t = 1.0
+    # FIX: Project the final continuous vector to the nearest codebook tokens
+    x_flat = x.reshape(-1, z_dim)
     
-    # Shape for VQ-VAE: [Batch, Height, Width]
+    # Compute L2 distance to codebook
+    d = torch.sum(x_flat ** 2, dim=1, keepdim=True) + \
+        torch.sum(codebook ** 2, dim=1) - 2 * \
+        torch.matmul(x_flat, codebook.t())
+        
+    final_indices = torch.argmin(d, dim=1)
     final_indices = final_indices.view(batch_size, 16, 16)
     
-    # FIX: Pass the shape argument so VQ-VAE permutes [B, H, W, C] to [B, C, H, W]
     images = vq_vae.decode_code(final_indices, shape=(batch_size, -1, 16, 16))
 
     return (images.clamp(-1, 1) + 1) / 2
@@ -141,7 +147,7 @@ def main():
 
     # 3. Initialize VFM Wrapper
     # We use the student model as the primary model for the wrapper
-    vfm = LlamaCatFlow(student_model, vq_model, obs_dim=(config["block_size"],))
+    vfm = LlamaCatFlow(student_model, vq_model, obs_dim=(config["block_size"],), temperature=1.0)
     codebook = vfm.get_codebook()
 
     # 4. Setup EMA Models
@@ -174,16 +180,15 @@ def main():
         t_proc = vfm.process_timesteps(t.view(-1), x)
         logits = vfm.model(t_proc, x, cond_idx=cond)
         
-        # 1. Standard probabilities (Used for S-VFM target math)
+        # 1. Pure, soft probabilities
         probs = F.softmax(logits, dim=-1)
         
-        # 2. Sharp Velocity (Used strictly for stepping to keep x_t2 On-Manifold)
-        idx = logits.argmax(dim=-1)
-        mu_sharp = F.embedding(idx, codebook)
-        vel_sharp = (mu_sharp - x) / (1 - t_proc.view(-1, 1, 1) + vfm.eps_)
+        # 2. Pure, soft expected vector (Crucial for the math to cancel)
+        mu_soft = torch.matmul(probs, codebook)
+        vel_soft = (mu_soft - x) / (1 - t_proc.view(-1, 1, 1) + EPS)
 
         vfm.model = orig_model 
-        return probs, vel_sharp, logits
+        return probs, vel_soft, logits
 
     global_step = 0
     for epoch in range(1, config["n_epochs"] + 1):
@@ -239,24 +244,25 @@ def main():
                 beta = ((t3 - t2) / (t3 - t1 + EPS)) * ((1 - t1) / (1 - t2 + EPS))
 
                 with torch.no_grad():
-                    # Teacher path
-                    P1_T, V1_sharp_T, _ = get_probs_vel_logits(
-                        teacher_model, t1[:nb_teacher], x_t1[:nb_teacher], cond_idx[:nb_teacher]
+                    P1_T, V1_T, _ = get_probs_vel_logits(
+                        teacher_model,
+                        t1[:nb_teacher],
+                        x_t1[:nb_teacher],
+                        cond_idx[:nb_teacher],
                     )
-                    # Step using SHARP velocity to guarantee x_t2 is On-Manifold
-                    x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_sharp_T
-                    
+                    x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_T
                     P2_T, _, _ = get_probs_vel_logits(
                         slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher]
                     )
                     P_target_T = alpha[:nb_teacher] * P1_T + beta[:nb_teacher] * P2_T
 
-                    # Student Consistency path
-                    P1_S, V1_sharp_S, _ = get_probs_vel_logits(
-                        fast_ema_model, t1[nb_teacher:], x_t1[nb_teacher:], cond_idx[nb_teacher:]
+                    P1_S, V1_S, _ = get_probs_vel_logits(
+                        fast_ema_model,
+                        t1[nb_teacher:],
+                        x_t1[nb_teacher:],
+                        cond_idx[nb_teacher:],
                     )
-                    x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_sharp_S
-                    
+                    x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_S
                     P2_S, _, _ = get_probs_vel_logits(
                         slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:]
                     )
@@ -264,11 +270,10 @@ def main():
 
                     P_target = torch.cat([P_target_T, P_target_S], dim=0)
 
-                # --- Student Update ---
-                _, _, student_logits = get_probs_vel_logits(student_model, t1, x_t1, cond_idx)
+                _, _, student_logits = get_probs_vel_logits(
+                    student_model, t1, x_t1, cond_idx
+                )
                 log_probs = F.log_softmax(student_logits, dim=-1)
-
-                # Standard KL Divergence (No Temperature Mismatch)
                 loss_per_token = F.kl_div(log_probs, P_target, reduction='none').sum(dim=-1)
                 
                 loss_per_image = loss_per_token.mean(dim=1)
