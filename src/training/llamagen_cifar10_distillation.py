@@ -35,7 +35,7 @@ def sample(model, vq_vae, codebook, device, cond_idx, steps):
     
     x = torch.randn(batch_size, 256, z_dim, device=device)
     
-    # Create exact timesteps:[0.0, 0.125, 0.25, ..., 1.0]
+    # FIX: n_steps + 1 ensures that steps=1 does exactly one jump from 0.0 to 1.0
     ts = torch.linspace(0, 1.0, steps + 1, device=device)
 
     for i in range(steps):
@@ -46,18 +46,13 @@ def sample(model, vq_vae, codebook, device, cond_idx, steps):
         t = torch.full((batch_size,), t_val, device=device)
         logits = model(t, x, cond_idx)
 
-        # Step using the exact soft math the model was trained on
         probs = F.softmax(logits, dim=-1)
         mu = torch.matmul(probs, codebook)
 
         vel = (mu - x) / (1.0 - t_val + EPS)
         x = x + vel * dt
 
-    # x is now fully integrated to t = 1.0
-    # FIX: Project the final continuous vector to the nearest codebook tokens
     x_flat = x.reshape(-1, z_dim)
-    
-    # Compute L2 distance to codebook
     d = torch.sum(x_flat ** 2, dim=1, keepdim=True) + \
         torch.sum(codebook ** 2, dim=1) - 2 * \
         torch.matmul(x_flat, codebook.t())
@@ -100,7 +95,7 @@ def main():
         slow_mu=0.999,
         fast_mu=0.99,
         s_range=[1.0, 1.2],
-        nb_teacher_steps=8,
+        nb_teacher_steps=2,
         ratio_teacher_samples=0.6,
         resume_checkpoint=None,
         fid_samples=1024
@@ -164,15 +159,14 @@ def main():
 
     
     dataloader = load_cifar10(config["batch_size"])
-    timesteps = torch.linspace(0, 1, config["nb_teacher_steps"] + 1, device=device)
-    fid_samples = config["fid_samples"]
+    effective_teacher_steps = max(config["nb_teacher_steps"], 2)
+    timesteps = torch.linspace(0, 1, effective_teacher_steps + 1, device=device)
 
     opt = torch.optim.AdamW(
         student_model.parameters(), lr=config["lr"], weight_decay=0.05
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config["n_epochs"] * len(dataloader))
 
-    # Functional helper to get probs and velocity using the wrapper's logic but varying the model
     def get_probs_vel_logits(model_instance, t, x, cond):
         orig_model = vfm.model
         vfm.model = model_instance
@@ -180,15 +174,12 @@ def main():
         t_proc = vfm.process_timesteps(t.view(-1), x)
         logits = vfm.model(t_proc, x, cond_idx=cond)
         
-        # 1. Pure, soft probabilities
         probs = F.softmax(logits, dim=-1)
-        
-        # 2. Pure, soft expected vector (Crucial for the math to cancel)
-        mu_soft = torch.matmul(probs, codebook)
-        vel_soft = (mu_soft - x) / (1 - t_proc.view(-1, 1, 1) + EPS)
+        mu_t = torch.matmul(probs, codebook)
+        vel = (mu_t - x) / (1 - t_proc.view(-1, 1, 1) + EPS)
 
         vfm.model = orig_model 
-        return probs, vel_soft, logits
+        return probs, vel, logits, mu_t
 
     global_step = 0
     for epoch in range(1, config["n_epochs"] + 1):
@@ -212,20 +203,31 @@ def main():
                 nb_teacher = int(config["ratio_teacher_samples"] * config["batch_size"])
                 nb_student = config["batch_size"] - nb_teacher
 
-                j_T = torch.randint(
-                    0, config["nb_teacher_steps"] - 1, (nb_teacher,), device=device
-                )
-                max_pow = int(math.log2(config["nb_teacher_steps"])) - 1
-                powers = torch.randint(1, max_pow + 1, (nb_student,), device=device)
-                strides = 2**powers
-                j_S = (
-                    torch.rand(nb_student, device=device)
-                    * (config["nb_teacher_steps"] - 2 * strides + 1)
-                ).long()
+                j_T = torch.randint(0, effective_teacher_steps - 1, (nb_teacher,), device=device)
+                t1_idx_T = j_T
+                t2_idx_T = j_T + 1
+                t3_idx_T = j_T + 2
 
-                t1_idx = torch.cat([j_T, j_S])
-                t2_idx = torch.cat([j_T + 1, j_S + strides])
-                t3_idx = torch.cat([j_T + 2, j_S + 2 * strides])
+                # --- Part B: Student (Random Large Stride) ---
+                if effective_teacher_steps > 2:
+                    max_pow = int(math.log2(effective_teacher_steps)) - 1
+                    powers = torch.randint(1, max_pow + 1, (nb_student,), device=device)
+                    strides = 2**powers
+                else:
+                    strides = torch.ones(nb_student, device=device, dtype=torch.long)
+
+                # Ensure j + 2*stride <= effective_teacher_steps
+                max_j = effective_teacher_steps - 2 * strides
+                j_S = (torch.rand(nb_student, device=device) * (max_j + 1)).long()
+                
+                t1_idx_S = j_S
+                t2_idx_S = j_S + strides
+                t3_idx_S = j_S + 2 * strides
+
+                # Combine
+                t1_idx = torch.cat([t1_idx_T, t1_idx_S])
+                t2_idx = torch.cat([t2_idx_T, t2_idx_S])
+                t3_idx = torch.cat([t3_idx_T, t3_idx_S])
 
                 def get_t(idx):
                     raw = timesteps[idx]
@@ -244,37 +246,42 @@ def main():
                 beta = ((t3 - t2) / (t3 - t1 + EPS)) * ((1 - t1) / (1 - t2 + EPS))
 
                 with torch.no_grad():
-                    P1_T, V1_T, _ = get_probs_vel_logits(
-                        teacher_model,
-                        t1[:nb_teacher],
-                        x_t1[:nb_teacher],
-                        cond_idx[:nb_teacher],
-                    )
+                    # 1. Get mu1 and Velocity from Teacher/FastEMA
+                    # Note: mu is the "expected destination x_1"
+                    _, V1_T, _, mu1_T = get_probs_vel_logits(teacher_model, t1[:nb_teacher], x_t1[:nb_teacher], cond_idx[:nb_teacher])
+                    _, V1_S, _, mu1_S = get_probs_vel_logits(fast_ema_model, t1[nb_teacher:], x_t1[nb_teacher:], cond_idx[nb_teacher:])
+                    
+                    # 2. Step the ODE to find x_t2
+                    # Use V1 (the velocity at the start) to find the midpoint
                     x_t2_T = x_t1[:nb_teacher] + (t2[:nb_teacher] - t1[:nb_teacher]) * V1_T
-                    P2_T, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher]
-                    )
-                    P_target_T = alpha[:nb_teacher] * P1_T + beta[:nb_teacher] * P2_T
-
-                    P1_S, V1_S, _ = get_probs_vel_logits(
-                        fast_ema_model,
-                        t1[nb_teacher:],
-                        x_t1[nb_teacher:],
-                        cond_idx[nb_teacher:],
-                    )
                     x_t2_S = x_t1[nb_teacher:] + (t2[nb_teacher:] - t1[nb_teacher:]) * V1_S
-                    P2_S, _, _ = get_probs_vel_logits(
-                        slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:]
-                    )
-                    P_target_S = alpha[nb_teacher:] * P1_S + beta[nb_teacher:] * P2_S
+                    
+                    # 3. Get mu2 from Slow EMA at the midpoint
+                    _, _, _, mu2_T = get_probs_vel_logits(slow_ema_model, t2[:nb_teacher], x_t2_T, cond_idx[:nb_teacher])
+                    _, _, _, mu2_S = get_probs_vel_logits(slow_ema_model, t2[nb_teacher:], x_t2_S, cond_idx[nb_teacher:])
+                    
+                    # 4. Compute the combined Continuous target destination mu
+                    mu_target_T = alpha[:nb_teacher] * mu1_T + beta[:nb_teacher] * mu2_T
+                    mu_target_S = alpha[nb_teacher:] * mu1_S + beta[nb_teacher:] * mu2_S
+                    mu_target = torch.cat([mu_target_T, mu_target_S], dim=0)
 
-                    P_target = torch.cat([P_target_T, P_target_S], dim=0)
+                    # --- PROJECT mu_target TO DISCRETE TOKENS (The Anti-Blur Fix) ---
+                    B, Seq, Dim = mu_target.shape
+                    mu_flat = mu_target.reshape(-1, Dim)
+                    
+                    # Efficient L2 distance to codebook: ||a-b||^2 = ||a||^2 + ||b||^2 - 2ab
+                    d = torch.sum(mu_flat**2, dim=1, keepdim=True) + \
+                        torch.sum(codebook**2, dim=1) - 2 * torch.matmul(mu_flat, codebook.t())
+                    
+                    target_indices = d.argmin(dim=1).view(B, Seq)
 
-                _, _, student_logits = get_probs_vel_logits(
-                    student_model, t1, x_t1, cond_idx
-                )
-                log_probs = F.log_softmax(student_logits, dim=-1)
-                loss_per_token = F.kl_div(log_probs, P_target, reduction='none').sum(dim=-1)
+                # --- Student Update (Hard Cross-Entropy) ---
+                _, _, student_logits, _ = get_probs_vel_logits(student_model, t1, x_t1, cond_idx)
+                
+                
+                # Standard Cross-Entropy against the projected tokens
+                # transpose(1, 2) changes shape to [Batch, VocabSize, SeqLen]
+                loss_per_token = F.cross_entropy(student_logits.transpose(1, 2), target_indices, reduction='none')
                 
                 loss_per_image = loss_per_token.mean(dim=1)
                 distillation_loss = loss_per_image[:nb_teacher].mean()     

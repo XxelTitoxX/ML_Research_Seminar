@@ -72,9 +72,10 @@ def main():
     vq_model.eval()
 
     model = GPT_B(vocab_size=512, num_classes=10, block_size=256).to(device)
-    path = "checkpoints/distilled_llamagen_epoch_16.pt"
+    path = "checkpoints/llamagen_epoch_250.pt"
     checkpoint = torch.load(path, map_location=device)
-    print(path)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    """print(path)
     state_dict = checkpoint["ema_state_dict"]
     new_state_dict = {}
     for k, v in state_dict.items():
@@ -82,7 +83,7 @@ def main():
         new_key = new_key.replace("module.", "")
         new_state_dict[new_key] = v
 
-    model.load_state_dict(new_state_dict)
+    model.load_state_dict(new_state_dict)"""
     model.eval()
     
     try:
@@ -90,16 +91,15 @@ def main():
     except:
         pass
 
-    vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(256,), temperature=1.0)
+    vfm_wrapper = LlamaCatFlow(model, vq_model, obs_dim=(256,))
     codebook = vfm_wrapper.get_codebook()
 
     cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
     cond_idx_vis = torch.arange(10, device=device).repeat(4)
     
     with torch.no_grad(), torch.autocast(device_type="cuda"):
-        vis_imgs = sample(model, vq_model, codebook, device, cond_idx_vis, 8)
-        # vis_imgs = vfm_wrapper.generate(n_samples=40,n_steps=8,method="euler", cond_idx=cond_idx_vis)
-        # vis_imgs = (vis_imgs.clamp(-1, 1) + 1) / 2
+        vis_imgs = vfm_wrapper.generate(n_samples=40,n_steps=2,method="euler", cond_idx=cond_idx_vis)
+        vis_imgs = (vis_imgs.clamp(-1, 1) + 1) / 2
         vis_imgs = vis_imgs.float().cpu()
 
     fig, axes = plt.subplots(4, 10, figsize=(15, 6))
@@ -145,10 +145,8 @@ def main():
                 cond_idx_gen = torch.randint(0, 10, (current_batch,), device=device)
                 
                 with torch.autocast(device_type="cuda"):
-                    fake_imgs = sample(model, vq_model, codebook, device, cond_idx_gen, 8)
-                    # fake_imgs = vfm_wrapper.generate(n_samples=current_batch, n_steps=8, method="euler", cond_idx=cond_idx_gen)
-                fake_imgs_uint8 = (fake_imgs * 255).to(torch.uint8)    
-                # fake_imgs_uint8 = ((fake_imgs.clamp(-1, 1) + 1) / 2 * 255).to(torch.uint8)
+                    fake_imgs = vfm_wrapper.generate(n_samples=current_batch, n_steps=2, method="euler", cond_idx=cond_idx_gen)
+                fake_imgs_uint8 = ((fake_imgs.clamp(-1, 1) + 1) / 2 * 255).to(torch.uint8)
                 fid.update(fake_imgs_uint8, real=False)
                 fake_processed += current_batch
                 pbar.update(current_batch)
