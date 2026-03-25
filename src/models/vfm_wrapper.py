@@ -26,7 +26,7 @@ class CatFlow(nn.Module):
         self.prior_eps = prior_eps
         self.loss = loss # "kld" or "mse"
         self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
-        self.eps_ = 1e-6
+        self.eps_ = 1e-8 # velocity denominator epsilon
         self.clamp_t: float = 0.05 # from Categorical Flow Map repository
         self.softmax = nn.Softmax(-1)
         self.p0: str = p0  # "uniform" or "gaussian"
@@ -121,7 +121,7 @@ class CatFlow(nn.Module):
         if self.loss == "mse":
             velocity = self.model(t, x)
         elif self.loss == "kld":
-            velocity = (self.model(t, x, return_probs=True) - x)/(1-t.view(-1, *dims) + self.eps_)
+            velocity = (self.model(t, x, return_probs=True) - x)/torch.clamp(1-t.view(-1, *dims), min=self.eps_)
         return velocity
     
     def reversed_velocity_with_div(self, t, state):
@@ -156,13 +156,13 @@ class CatFlow(nn.Module):
         x_scaled = x * (1 - (1 - self.sigma_min) * t)
         return x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype))
     
-    def conditional_velocity(self, t, x, x1, eps=1e-7):
+    def conditional_velocity(self, t, x, x1):
         """
         Computes (x1-x)/(1-t) =  - (x-x1)/(1-t) = - (x/(1-t) - x1/(1-t))
         """
         dims = [1]*(len(x.shape)-1)
         t = t.view(-1, *dims)
-        denom = 1-t.expand(-1, x1.shape[1], 1) + eps
+        denom = torch.clamp(1 - t[:, None, None], min=self.eps_)
         values = - 1.0/denom
         x_scaled = x/denom
         return -x_scaled.scatter_add(2, x1.unsqueeze(-1), values.to(x.dtype))

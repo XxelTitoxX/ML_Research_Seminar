@@ -371,7 +371,7 @@ def evaluate_generation_accuracy(
     num_samples: int,
     sample_batch_size: int,
     method: str = "euler",
-    n_steps: int = 10,
+    n_steps: int = 100,
 ) -> dict[str, float]:
     if num_samples <= 0:
         return {}

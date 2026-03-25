@@ -31,7 +31,7 @@ def pick_device():
 def load_uniprot(data_root: str, batch_size: int, train: bool = True, labels: bool = False, shuffle: bool = True) -> DataLoader:
     split = "train" if train else "test"
     proportion = "9k" if train else "1k"
-    data_path = Path(data_root) / f"uniprot_{split}{proportion}.pt"
+    data_path = Path(data_root) / f"uniprot_{split}_seq32_{proportion}.pt"
     indices_tensor = torch.load(data_path, map_location="cpu")
     if labels:
         dataset = TensorDataset(indices_tensor, torch.zeros(len(indices_tensor), dtype=torch.long))  # dummy labels
@@ -83,28 +83,42 @@ def make_plot(ts, error_t, out_path, logy=False):
     fig.savefig(out_path)
     plt.close(fig)
 
+def make_plot_cossim(ts, error_t, out_path):
+    fig, ax = plt.subplots()
+
+    ax.plot(ts.cpu(), error_t.cpu())   # no marker
+    ax.set_xlabel("Time $t$")
+    ax.set_ylabel("Average Cosine Similarity")
+
+    # subtle horizontal grid only
+    ax.grid(True, axis="y", alpha=0.25, linestyle="--")
+
+    fig.savefig(out_path)
+    plt.close(fig)
+
 def main():
     torch.backends.cudnn.benchmark = True
     device = pick_device()
+    device = torch.device("cpu") 
 
     flow, model_cfg, obs_dim = load_catflow_checkpoint(
-        flow_checkpoint_path=CHECKPOINTS / "kld_9k_uniform_21000.pt",
+        flow_checkpoint_path=CHECKPOINTS / "cfm_uni_9k_seq32_21000.pt",
         device=device,
     )
     flow.eval()
-    flow.loss = "kld"  # override loss just for error computation
-    flow.p0 = "uniform"  # override prior just for error computation
+    flow.loss = "mse"  # "kld" or "mse", override loss just for error computation
+    flow.p0 = "uniform"  # "uniform" or "gaussian_scaled", override prior to make sure we have same config as checkpoint
     print(f"Loaded CatFlow checkpoint : loss={flow.loss}, prior={flow.p0}, obs_dim={obs_dim}")
 
     cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
     
     
-    n_steps = 20
-    clamp_t = 0.01
+    n_steps = 100
+    clamp_t = 0.001
     n_xt_samples = 128
     batch_size_xt = 8
     batch_size_x1prime = 128
-    ts = torch.linspace(0, 1.0 - clamp_t, n_steps, device=device)
+    ts = torch.cat([torch.linspace(0, 1.0 - clamp_t, n_steps, device=device), torch.tensor([0.9999, 0.99999], device=device)])
 
     # Create dataloader of sequences of one-hot encoded codebook indices
     # DO NOT USE SHUFFLE for x1' dataloader !
@@ -112,6 +126,7 @@ def main():
     dataloader_x1prime = load_uniprot(DATA_PROCESSED, batch_size=batch_size_x1prime, train=True, labels=False, shuffle=False)
 
     error_t = torch.zeros_like(ts)
+    cos_sim_t = torch.zeros_like(ts)
     with torch.inference_mode():
         for i, t in enumerate(ts):
             print(f"Processing time step {i+1}/{len(ts)}: t={t.item():.4f}")
@@ -136,14 +151,27 @@ def main():
                 
                 # Compute error
                 error_b = torch.norm(u_star_b - model_velocity_b, dim=-1).sum().item()
-                pbar.set_postfix({"error": error_b})
+
+                # Compute cosine similarity between closed-form velocity and conditional velocity
+                cond_vel_b = x1_b - x0_b
+                cos_sim_b = F.cosine_similarity(
+                    u_star_b.flatten(1),
+                    cond_vel_b.flatten(1),
+                    dim=-1,
+                    eps=1e-8
+                ).sum().item()
+                pbar.set_postfix({"error": error_b, "cos_sim": cos_sim_b})
                 error_t[i] += error_b
+                cos_sim_t[i] += cos_sim_b
                 xt_processed += xt_b_size
             error_t[i] /= n_xt_samples
             print(f"Average L2 error at t={t.item():.4f}: {error_t[i].item():.4f}")
+            cos_sim_t[i] /= n_xt_samples
+            print(f"Average cosine similarity at t={t.item():.4f}: {cos_sim_t[i].item():.4f}")
     
     make_plot(ts, error_t, "velocity_error.png", logy=False)
-    make_plot(ts, error_t, "velocity_error_log.png", logy=True)
+    # make_plot(ts, error_t, "velocity_error_log.png", logy=True)
+    make_plot_cossim(ts, cos_sim_t, "cosine_similarity.png")
 
         
 
